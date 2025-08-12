@@ -29,11 +29,11 @@ all_image_features_gan_pca = pca.fit_transform(mat['all_image_features_gan'])
 # %%
 import models
 reload(models)
-from models import AttentionFusion, Predictor, Decoder
+from models import AttentionFusion, SpiciePredictor, Decoder
 device = torch.device('cuda') if torch.cuda.is_available() else 'cpu'
 fusion = AttentionFusion(512, 512, 512).to(device)
 decoder = Decoder(512, 1050).to(device)
-predictor = Predictor(fusion, decoder).to(device)
+predictor = SpiciePredictor(fusion, decoder).to(device)
 predictor.fit(all_dna_features_cnn_pca, 
               all_image_features_gan_pca, 
               mat['all_labels'].squeeze(), 
