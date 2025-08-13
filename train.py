@@ -8,7 +8,7 @@ import scipy.io
 from matplotlib import pyplot as plt
 import numpy as np
 import dataset
-import dnabert
+import dnaencoder
 from importlib import reload
 from sklearn.decomposition import PCA
 

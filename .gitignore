@@ -3,3 +3,5 @@
 **.pyc
 *.mat
 output
+/dnaencoder-finetuned*
+/vit-finetuned*

@@ -139,7 +139,26 @@ def finetune_on_species(mat: dict, outdir="./vit-finetuned"+str(int(time.time())
     print("Fine-tuning completed!")
 
 
+def get_processor_encoder(model_name="./vit-finetuned-best-final", device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    tokenizer = AutoImageProcessor.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModel.from_pretrained(model_name, trust_remote_code=True).to(device)
 
+    return tokenizer, model
+
+def get_cls_embedding(images, processor, model, device=None):
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Prepare inputs
+    inputs = processor(images, return_tensors="pt").to(device)
+    
+    # Forward pass
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    # CLS token embedding (first token)
+    cls_embeds = outputs.last_hidden_state[:, 0, :]
+    return cls_embeds
 
 def evaluate_model(mat, model_name="./vit-finetuned-final", device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     # Load
@@ -151,6 +170,7 @@ def evaluate_model(mat, model_name="./vit-finetuned-final", device = torch.devic
     all_images = torch.tensor(mat['all_images']).to(device)  # Shape: (32424, 3, 64, 64)
     all_labels = torch.tensor(mat['all_labels'].squeeze()).to(device) 
     val_indices = (mat['val_seen_loc']-1).flatten()      # Get validation indices
+    test_indices = (mat['val_unseen_loc']-1).flatten()      # Get validation indices
 
     # If labels are one-hot encoded or multi-dimensional, convert to class indices
     if all_labels.dim() > 1:
@@ -166,8 +186,12 @@ def evaluate_model(mat, model_name="./vit-finetuned-final", device = torch.devic
     val_images = all_images[val_indices]
     val_labels = labels[val_indices].cpu().numpy()
 
+    test_images = all_images[test_indices]
+    test_labels = labels[test_indices].cpu().numpy()
+
     # Create datasets again
     val_dataset = ImageDataset(val_images, val_labels, processor, device)
+    test_dataset = ImageDataset(test_images, test_labels, processor, device)
 
     training_args = TrainingArguments(
         per_device_train_batch_size=32,
@@ -189,7 +213,7 @@ def evaluate_model(mat, model_name="./vit-finetuned-final", device = torch.devic
     data_collator = DefaultDataCollator()
 
     # Create trainer just for evaluation
-    trainer = Trainer(
+    val_trainer = Trainer(
         model=model,
         args=training_args,
         eval_dataset=val_dataset,
@@ -198,8 +222,21 @@ def evaluate_model(mat, model_name="./vit-finetuned-final", device = torch.devic
     )
 
     # Evaluate
-    results = trainer.evaluate()
-    return results
+    val_results = val_trainer.evaluate()
+
+    test_trainer = Trainer(
+        model=model,
+        args=training_args,
+        eval_dataset=test_dataset,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics
+    )
+
+    # Evaluate
+    test_results = test_trainer.evaluate()
+
+
+    return val_results, test_results
 
 
 
@@ -232,7 +269,8 @@ if __name__ == "__main__":
         print("Device: ", device)
 
 
-        res = evaluate_model(mat, model_name=model_name, device=device)
-        print(res)
+        val_res, test_res = evaluate_model(mat, model_name=model_name, device=device)
+        print("Validation results:", val_res)
+        print("Test results:", test_res)
     else:
         print("Unknown task:", sys.argv[1])

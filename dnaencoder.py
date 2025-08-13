@@ -11,10 +11,13 @@ from transformers import (
     AutoModelForSequenceClassification,
     TrainingArguments, 
     Trainer,
+    AutoConfig,
     DefaultDataCollator
 )
 import numpy as np
+from safetensors.torch import load_file
 from dotenv import load_dotenv
+from os.path import join
 
 load_dotenv()  # load environment variables
 
@@ -65,7 +68,7 @@ class DNADataset(Dataset):
         }
 
 
-def finetune_on_species(mat: dict, outdir="./dnaencoder-finetuned"+str(int(time.time())), model_name=org_model_name, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+def finetune_on_species(mat: dict, outdir="./dnaencoder-finetuned"+str(int(time.time())), model_name=org_model_name, resume_from=None, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     
     # Check if outdir exists, then create another outdir
     _i = 2
@@ -159,7 +162,7 @@ def finetune_on_species(mat: dict, outdir="./dnaencoder-finetuned"+str(int(time.
 
     # Fine-tune the model
     print("Starting fine-tuning...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from)
 
     results = trainer.evaluate()
     print("Final evaluation results:", results)
@@ -173,11 +176,16 @@ def finetune_on_species(mat: dict, outdir="./dnaencoder-finetuned"+str(int(time.
     print(f"Model saved to: {final_outdir}")
 
 
-# Load accuracy metric
+
+def get_tokenizer_encoder(model_name="./dnaencoder-finetuned-final", device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModel.from_pretrained(model_name, trust_remote_code=True).to(device)
+
+    return tokenizer, model
 
 
-
-def evaluate_model(mat, model_name="./dnaencoder-finetuned-final", device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+def evaluate_model(mat,model_name="./dnaencoder-finetuned-final", device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     
     print(f"Evaluating model: {model_name}")
     
@@ -185,15 +193,20 @@ def evaluate_model(mat, model_name="./dnaencoder-finetuned-final", device=torch.
     hf_token = os.getenv("HF_TOKEN")
     if not hf_token:
         print("Warning: HF_TOKEN not found in environment variables")
+    
+    # config = AutoConfig.from_pretrained(model_name)
 
     # Load tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, token=hf_token)
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, trust_remote_code=True, token=hf_token).to(device)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, trust_remote_code=True,  token=hf_token).to(device)
+
+    # model.load_state_dict(load_file(join(model_name, "model.safetensors")))
 
     # Load your data
     dna_strings = mat['all_string_dnas'].squeeze()
     all_labels = mat['all_labels'].squeeze()
     val_indices = (mat['val_seen_loc'] - 1).flatten()  # Get validation indices
+    test_indices = (mat['val_unseen_loc'] - 1).flatten()
 
     # Convert labels to class indices if needed
     if len(all_labels.shape) > 1:
@@ -209,10 +222,16 @@ def evaluate_model(mat, model_name="./dnaencoder-finetuned-final", device=torch.
     val_dna_strings = dna_strings[val_indices]
     val_labels = labels[val_indices]
 
+    test_dna_strings = dna_strings[test_indices]
+    test_labels = labels[test_indices]
+
     print(f"Validation samples: {len(val_dna_strings)}")
 
     # Create dataset
     val_dataset = DNADataset(val_dna_strings, val_labels, tokenizer)
+
+    # Create dataset
+    test_dataset = DNADataset(test_dna_strings, test_labels, tokenizer)
 
     # Training arguments (needed for Trainer even in evaluation mode)
     training_args = TrainingArguments(
@@ -226,7 +245,7 @@ def evaluate_model(mat, model_name="./dnaencoder-finetuned-final", device=torch.
     data_collator = DefaultDataCollator()
 
     # Create trainer just for evaluation
-    trainer = Trainer(
+    val_trainer = Trainer(
         model=model,
         args=training_args,
         eval_dataset=val_dataset,
@@ -235,10 +254,22 @@ def evaluate_model(mat, model_name="./dnaencoder-finetuned-final", device=torch.
     )
 
     # Evaluate
-    print("Starting evaluation...")
-    results = trainer.evaluate()
+    print("Starting validation evaluation...")
+    val_results = val_trainer.evaluate()
+
+    test_trainer = Trainer(
+        model=model,
+        args=training_args,
+        eval_dataset=val_dataset,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics
+    )
+
+    # Evaluate
+    print("Starting test evaluation...")
+    test_results = test_trainer.evaluate()
     
-    return results
+    return val_results, test_results
 
 
 if __name__ == "__main__":
@@ -268,7 +299,7 @@ if __name__ == "__main__":
         else:
             model_name = "./dnabert-finetuned-final"
 
-        print("Task: evaluate DNABERT, model:", model_name)
+        print("Task: evaluate DNAENCODER, model:", model_name)
 
         print("Loading mat file...")
         from mat import mat
@@ -276,11 +307,12 @@ if __name__ == "__main__":
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Device: ", device)
-
-        res = evaluate_model(mat, model_name=model_name, device=device)
-        print("Evaluation results:")
-        print(res)
+        val_results, test_results = evaluate_model(mat, model_name=model_name, device=device)
+        print("Seen Evaluation results:")
+        print(val_results)
+        print("Unseen Evaluation results:")
+        print(test_results)
         
     else:
         print("Unknown task:", sys.argv[1])
-        print("Available tasks: finetune, evaluate")
+        print("Available tasks: finetune, evaluate, test")

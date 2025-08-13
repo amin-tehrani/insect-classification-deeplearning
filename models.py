@@ -7,51 +7,96 @@ import time
 from torch.nn import functional as F
 
 class AttentionFusion(nn.Module):
-    def __init__(self, dna_dim, img_dim, fused_dim, dna_len_dim=16, num_distinct_dna_len=120, num_heads=4):
+    def __init__(self, dna_dim, img_dim, fused_dim=None, dna_len_dim=16, num_distinct_dna_len=120, proj_dna_dim=None, proj_img_dim=None, num_heads=None):
         super().__init__()
 
         self.dna_dim=dna_dim
         self.img_dim=img_dim
-        self.fused_dim=fused_dim
+        self.fused_dim = fused_dim
         self.dna_len_dim=dna_len_dim
         self.num_heads=num_heads
+        self.proj_dna_dim=proj_dna_dim
+        self.proj_img_dim=proj_img_dim
 
         # Project both embeddings into same space
         self.dna_len_emb = nn.Embedding(num_embeddings=num_distinct_dna_len, embedding_dim=dna_len_dim)
-        self.proj_dna = nn.Linear(dna_dim, fused_dim-dna_len_dim)
-        self.proj_img = nn.Linear(img_dim, fused_dim)
-        
-        # Attention layer
-        # self.attn = nn.MultiheadAttention(embed_dim=fused_dim, num_heads=num_heads, batch_first=True)
+        if proj_dna_dim is not None:
+            self.proj_dna = nn.Linear(dna_dim, proj_dna_dim)
+        if proj_img_dim is not None:
+            self.proj_img = nn.Linear(img_dim, proj_img_dim)
 
+        # self.proj_dna = nn.Linear(dna_dim, fused_dim-dna_len_dim)
+        # self.proj_img = nn.Linear(img_dim, fused_dim)
+        
         self.weight_dna_len = nn.Parameter(torch.ones(1))
         self.weight_dna = nn.Parameter(torch.ones(1))
         self.weight_img = nn.Parameter(torch.ones(1))
+
+        # Attention layer
+        if num_heads:
+            self.attn = nn.MultiheadAttention(embed_dim=self.concatenated_dim, num_heads=num_heads, batch_first=True)
+        
         
         # Optional: feed-forward layer after attention
         self.ffn = nn.Sequential(
-            nn.Linear(fused_dim*2, fused_dim),
+            nn.Linear(self.concatenated_dim, self.fused_dim),
             # nn.ReLU(),
             # nn.Linear(fused_dim, fused_dim)
         )
+
+    @property
+    def concatenated_dim(self):
+        if self.proj_dna_dim is not None:
+            out_dna_dim = self.proj_dna_dim
+        else:
+            out_dna_dim = self.dna_dim
+
+        if self.proj_img_dim is not None:
+            out_img_dim = self.proj_img_dim
+        else:
+            out_img_dim = self.img_dim
+
+        return self.dna_len_dim + out_dna_dim + out_img_dim
+        
+    @property
+    def fused_dim(self):
+        if self.fused_dim is not None:
+            return self.fused_dim
+        else:
+            return self.concatenated_dim()
+
+        
 
     def forward(self, dna_len_tokens, dna_emb, img_emb):
         # dna_emb: [batch, dna_dim]
         # img_emb: [batch, img_dim]
         # Project into same space
         dna_len_emb = self.dna_len_emb(dna_len_tokens).unsqueeze(1)  # [batch, dna_len_dim]
-        dna_proj = self.proj_dna(dna_emb).unsqueeze(1)  # [batch, 1, D - dna_len_dim]
-        img_proj = self.proj_img(img_emb).unsqueeze(1)  # [batch, 1, D]
-        
-        dna_final_emb = torch.cat([self.weight_dna_len * dna_len_emb, self.weight_dna * dna_proj], dim=2)  # [batch, 1, D]
 
-        # Concatenate as sequence
-        fused = seq = torch.cat([dna_final_emb, self.weight_img *img_proj], dim=2).squeeze(1)  # [batch, 2, D]
+        if self.proj_dna_dim is not None:
+            dna_proj = self.proj_dna(dna_emb).unsqueeze(1)  # [batch, 1, proj_dna_dim]
+        else:
+            dna_proj = self.dna_dim.unsqueeze(1)
+
+        if self.proj_img_dim is not None:
+            img_proj = self.proj_img(img_emb).unsqueeze(1)  # [batch, 1, proj_img_dim]
+        else:
+            img_proj = self.img_dim.unsqueeze(1)
         
-        # Self-attention
-        # attn_out, _ = self.attn(seq, seq, seq)  # [batch, 2, D]
         
-        # Aggregate embeddings (mean pooling)
+        dna_final_emb = torch.cat([self.weight_dna_len * dna_len_emb, self.weight_dna * dna_proj], dim=2)  # [batch, 1, dna_len_dim + dna_dim]
+
+        seq = torch.cat([dna_final_emb, self.weight_img *img_proj], dim=2).squeeze(1)  # [batch, concat_dim]
+        
+        if self.num_heads:
+            # Self-attention
+            fused, _ = self.attn(seq, seq, seq)  # [batch, concat_dim]
+        else:
+            fused = seq
+        
+        
+        
+        # Aggregate embelddings (mean pooling)
         # fused = attn_out.mean(dim=1)  # [batch, D]
         
         # Optional FFN
