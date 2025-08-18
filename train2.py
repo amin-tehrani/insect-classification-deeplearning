@@ -81,63 +81,6 @@ deviceCPU = torch.device("cpu")
 
 device = deviceCPU
 print("Device:", device)
-# %%
-from torch.utils.data import Dataset
-
-# class MultiModalDataset:
-#     def __init__(self, dna_strings, images, labels, dna_str_len_mapping, species2genus, genus_species, img_processor, dna_tokenizer, max_length=1600):
-#         self.images = images
-#         self.dna_strings = dna_strings
-#         self.labels = labels
-#         self.img_processor = img_processor
-#         self.dna_tokenizer = dna_tokenizer
-#         self.dna_str_len_mapping = dna_str_len_mapping
-#         self.species2genus = species2genus
-#         self.max_length = max_length
-#         self.genus_species = genus_species
-
-#     def __len__(self):
-#         return len(self.labels)
-    
-#     def __getitem__(self, idx):
-#         # ===== Image Processing =====
-#         image = self.images[idx].permute(1, 2, 0).cpu().numpy()  # CHW -> HWC
-#         if image.max() <= 1.0:
-#             image = (image * 255).astype(np.uint8)
-        
-
-#         image_encoding = self.img_processor(images=image, return_tensors="pt")
-#         pixel_values = image_encoding['pixel_values'].squeeze(0)
-
-#         # ===== DNA Processing =====
-#         dna_sequence = self.dna_strings[idx].strip()
-#         dna_len_token = self.dna_str_len_mapping.get(len(dna_sequence), 0)  # default 0 if not found
-
-#         dna_encoding = self.dna_tokenizer(
-#             dna_sequence,
-#             truncation=True,
-#             padding='max_length',
-#             max_length=self.max_length,
-#             return_tensors='pt'
-#         )
-        
-#         input_ids = dna_encoding['input_ids'].squeeze(0)
-#         attention_mask = dna_encoding['attention_mask'].squeeze(0)
-
-#         # ===== Label & Genus =====
-#         label = torch.tensor(self.labels[idx], dtype=torch.long)
-#         genus = torch.tensor(self.species2genus[idx], dtype=torch.long)
-
-#         return {
-#             'pixel_values': pixel_values,
-#             'dna_len_token': torch.tensor(dna_len_token, dtype=torch.long),
-#             'input_ids': input_ids,
-#             'attention_mask': attention_mask,
-#             'labels': label,
-#             'genus': genus
-#         }
-
-
 
 from dataset import MultiModalDataset
 # %%
