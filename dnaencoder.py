@@ -187,7 +187,6 @@ def get_tokenizer_encoder(model_name="./dnaencoder-finetuned-final", device=torc
 
 def get_dna_embedding(dnas, tokenizer, model, device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
 
-    print(type(dnas))
     # Prepare inputs
     inputs = tokenizer(dnas.tolist(), truncation=True,
             padding='max_length',

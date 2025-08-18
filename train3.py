@@ -32,17 +32,6 @@ print("Max specie in genus: ", max_specie_in_genus)
 
 
 # %%
-from sklearn.decomposition import PCA
-
-pca = PCA(n_components=512)
-all_dna_features_cnn_pca = np.array(pca.fit_transform(mat['all_dna_features_cnn_new']))
-
-
-# %%
-pca = PCA(n_components=768)
-all_image_features_gan_pca = np.array(pca.fit_transform(mat['all_image_features_gan']))
-
-# %%
 
 all_dna_len = list(map(lambda s: len(s.strip()), mat['all_string_dnas']))
 dna_str_len_mapping: dict[int,int] = {}
@@ -57,28 +46,47 @@ def dna_str_len_to_int(s_len):
 
 all_dna_len_tokens = list(map(dna_str_len_to_int, all_dna_len))
 all_dna_len_tokens = np.array(all_dna_len_tokens, dtype=np.int64)
-print(list(zip(all_dna_len, all_dna_len_tokens))[:20])
+# print(list(zip(all_dna_len, all_dna_len_tokens))[:20])
 
 # %%
-deviceGPU = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+deviceGPU = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 deviceCPU = torch.device("cpu")
 
-device = deviceGP
-device
+device = deviceGPU
+print("Device:",device)
+
 
 # %%
 import vit
 reload(vit)
 from vit import get_processor_encoder, get_img_embedding
 img_processor, img_encoder = get_processor_encoder("./vit-finetuned7-final", device)
-get_img_embedding(mat['all_images'][:2], img_processor, img_encoder, device).shape
+# get_img_embedding(mat['all_images'][:2], img_processor, img_encoder, device).shape
 
 # %%
 import dnaencoder
 reload(dnaencoder)
 from dnaencoder import get_tokenizer_encoder, get_dna_embedding
 dna_tokenizer, dna_encoder = get_tokenizer_encoder("./dnaencoder-finetuned1755100772-final", deviceGPU)
-get_dna_embedding(mat['all_string_dnas'][:2], dna_tokenizer, dna_encoder).shape
+# get_dna_embedding(mat['all_string_dnas'][:2], dna_tokenizer, dna_encoder).shape
+
+# %%
+# from sklearn.decomposition import PCA
+
+# pca = PCA(n_components=512)
+# all_dna_features_cnn = np.array(pca.fit_transform(mat['all_dna_features_cnn_new']))
+from load_embeddings import load_dna_embeddings, load_img_embeddings
+
+all_dna_features = load_dna_embeddings()
+all_image_features = load_img_embeddings()
+
+
+# %%
+# pca = PCA(n_components=768)
+# all_image_features_gan = np.array(pca.fit_transform(mat['all_image_features_gan']))
+# all_image_features_gan = get_img_embedding(mat['all_images'], img_processor, img_encoder, deviceGPU)
+
+# print("All IMG features shape:", all_image_features_cnn.shape)
 
 # %%
 # import multimodal_dataset
@@ -105,26 +113,29 @@ from multimodal_dataset import MultiModalDataset
 # all_dataset = MultiModalDataset(mat['all_string_dnas'], mat['all_images'], np.transpose(mat['all_labels'], (1,0)), dna_str_len_mapping, species2genus, genus_species, None, None, 
 #                             dna_embeddings=all_dna_features_cnn_pca, img_embeddings=all_image_features_gan_pca)
 
-train_dataset = MultiModalDataset(mat['all_string_dnas'][train_indices], mat['all_images'][train_indices], np.transpose(mat['all_labels'], (1,0))[train_indices], dna_str_len_mapping, species2genus, genus_species, img_processor, dna_tokenizer,)
-val_dataset = MultiModalDataset(mat['all_string_dnas'][val_indices], mat['all_images'][val_indices], np.transpose(mat['all_labels'], (1,0))[val_indices], dna_str_len_mapping, species2genus, genus_species, img_processor, dna_tokenizer,)
+train_dataset = MultiModalDataset(mat['all_string_dnas'][train_indices], mat['all_images'][train_indices], np.transpose(mat['all_labels'], (1,0))[train_indices], dna_str_len_mapping, species2genus, genus_species, None, None, dna_embeddings=all_dna_features[train_indices], img_embeddings=all_image_features[train_indices])
+val_dataset = MultiModalDataset(mat['all_string_dnas'][val_indices], mat['all_images'][val_indices], np.transpose(mat['all_labels'], (1,0))[val_indices], dna_str_len_mapping, species2genus, genus_species, None, None, dna_embeddings=all_dna_features[val_indices], img_embeddings=all_image_features[val_indices])
 
+# print(train_dataset[0])
+# exit()
 # %%
 
 
 import models
 reload(models)
 from models import AttentionFusion, GenusClassifier, LocalSpecieClassfier, MainClassifier, multimodal_collector
-from transformers import DefaultDataCollator
-
 
 def get_main_classifier():
-    fusion_embedder = AttentionFusion(dna_dim=512,img_dim=768,dna_len_dim=16)
+    fusion_embedder = AttentionFusion(dna_dim=512,img_dim=768,dna_len_dim=16, fused_dim=512, proj_dna_dim=512-16, proj_img_dim=512, num_heads=None, dropout=0.0)
     print("Fusion model created. fused dim: ", fusion_embedder.fused_dim)
-    genus_classifier = GenusClassifier(fusion_embedder.fused_dim)
+    genus_classifier = GenusClassifier(fusion_embedder.fused_dim,dropout=0.0)
 
-    local_specie_classifier = LocalSpecieClassfier(fusion_embedder.fused_dim)
+    local_specie_classifier = LocalSpecieClassfier(fusion_embedder.fused_dim,reduced_fused_dim=256, specie_decoder_hidden_dim=128, dropout=0.0,)
 
-    return MainClassifier(mat['species2genus'], genus_species, dna_encoder, img_encoder, fusion_embedder, genus_classifier, local_specie_classifier).to(device)
+    return MainClassifier(mat['species2genus'], genus_species, None, None, fusion_embedder, genus_classifier,
+                          local_specie_classifier,
+                          alpha=3, beta=0, theta=0,
+                          ).to(device)
 
 main_classifier = get_main_classifier()
 
@@ -132,17 +143,28 @@ main_classifier = get_main_classifier()
 # print(main_classifier(**dataset[0]))
 # print(main_classifier(**dataset[0:2]))
 import os
+# os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# os.environ.setdefault("NCCL_P2P_DISABLE", "0") # export NCCL_P2P_DISABLE=0
+# os.environ.setdefault("NCCL_IB_DISABLE", "0") # export NCCL_IB_DISABLE=0
+# os.environ.setdefault("OMP_NUM_THREADS", "4") # export OMP_NUM_THREADS=4
+
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # Disable Weights & Biases logging
 # os.environ["TORCH_USE_CUDA_DSA"] = "1"  # Disable Weights & Biases logging
+
+import warnings
+warnings.filterwarnings("ignore")
 
 
 # %%
 main_classifier.fit(
     train_dataset,
     val_dataset,
-    batch_size=32,
-    epochs=3,
-    eval_steps=10,
+    batch_size=64,
+    epochs=500,
+    eval_steps=200,
+    save_steps=400,
+    lr=1e-3
 )
 
 

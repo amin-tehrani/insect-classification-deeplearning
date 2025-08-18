@@ -13,21 +13,45 @@ accuracy = evaluate.load("accuracy")
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-
-    # Handle logits if it’s a tuple
     if isinstance(logits, (tuple, list)):
         logits = logits[0]
-
-    # Flatten labels if shape is (batch, 1)
     labels = np.array(labels).reshape(-1)
-
     preds = np.argmax(logits, axis=-1)
+    return {"accuracy": accuracy.compute(predictions=preds, references=labels)["accuracy"]}
 
-    return accuracy.compute(predictions=preds, references=labels)
 
+
+def multimodal_collector(features):
+    batch = {}
+    keys = features[0].keys()
     
+    if 'dna_len_tokens' in keys:
+        batch['dna_len_tokens'] = torch.cat([f['dna_len_tokens'] for f in features], dim=0)
+    if 'image_inputs' in keys:
+        batch['image_inputs'] = {
+            "pixel_values": torch.cat([f['image_inputs']['pixel_values'] for f in features], dim=0)
+        }
+    if 'genus' in keys:
+        batch['genus'] = torch.cat([f['genus'] for f in features], dim=0)
+    if 'labels' in keys:
+        batch['labels'] = torch.cat([f['labels'] for f in features], dim=0)
+    if 'local_specie_lbl' in keys:
+        batch['local_specie_lbl'] = torch.cat([f['local_specie_lbl'] for f in features], dim=0)
+    if 'dna_inputs' in keys:
+        batch['dna_inputs'] = {
+            "input_ids": torch.cat([f['dna_inputs']['input_ids'] for f in features], dim=0),
+            "attention_mask": torch.cat([f['dna_inputs']['attention_mask'] for f in features], dim=0)
+        }
+    if 'img_emb' in keys:
+        batch['img_emb'] = torch.cat([f['img_emb'] for f in features], dim=0)
+    if 'dna_emb' in keys:
+        batch['dna_emb'] = torch.cat([f['dna_emb'] for f in features], dim=0)
+
+    # print(batch.keys())
+    return batch
+
 class AttentionFusion(nn.Module):
-    def __init__(self, dna_dim, img_dim, fused_dim=None, dna_len_dim=16, num_distinct_dna_len=120, proj_dna_dim=None, proj_img_dim=None, num_heads=None):
+    def __init__(self, dna_dim, img_dim, fused_dim=None, dna_len_dim=16, num_distinct_dna_len=120, proj_dna_dim=None, proj_img_dim=None, num_heads=None, dropout=0.1):
         super().__init__()
 
         self.dna_dim=dna_dim
@@ -52,6 +76,8 @@ class AttentionFusion(nn.Module):
         self.weight_dna = nn.Parameter(torch.ones(1))
         self.weight_img = nn.Parameter(torch.ones(1))
 
+        self.dropout = dropout
+
         # Attention layer
         if num_heads:
             self.attn = nn.MultiheadAttention(embed_dim=self.concatenated_dim, num_heads=num_heads, batch_first=True)
@@ -61,6 +87,7 @@ class AttentionFusion(nn.Module):
         self.ffn = nn.Sequential(
             nn.Linear(self.concatenated_dim, self.fused_dim),
             # nn.ReLU(),
+            # nn.Dropout(p=0.1),
             # nn.Linear(fused_dim, fused_dim)
         )
 
@@ -102,12 +129,12 @@ class AttentionFusion(nn.Module):
         # print("dna_len_emb.shape",dna_len_emb.shape)
 
         if self.proj_dna_dim is not None:
-            dna_proj = self.proj_dna(dna_emb)  # [batch, 1, proj_dna_dim]
+            dna_proj = F.dropout(self.proj_dna(dna_emb), self.dropout, training=self.training)  # [batch, 1, proj_dna_dim]
         else:
             dna_proj = dna_emb
 
         if self.proj_img_dim is not None:
-            img_proj = self.proj_img(img_emb)  # [batch, 1, proj_img_dim]
+            img_proj = F.dropout(self.proj_img(img_emb), self.dropout, training=self.training)  # [batch, 1, proj_img_dim]
         else:
             img_proj = img_emb
 
@@ -134,35 +161,19 @@ class AttentionFusion(nn.Module):
         fused = self.ffn(fused)
         return fused
 
-
-class Decoder(nn.Module):
-    def __init__(self, fused_dim, hidden_dim, num_classes):
-        super().__init__()
-        self.fused_dim = fused_dim
-        self.hidden_dim = hidden_dim
-        self.num_classes = num_classes
-
-        self.ffn = nn.Sequential(
-            nn.Linear(fused_dim, hidden_dim),
-            nn.Sigmoid(),
-            nn.Linear(hidden_dim, num_classes)
-        )
-
-    def forward(self, fused):
-        x = self.ffn(fused)
-        logits = torch.softmax(x, dim=1)
-        return logits
     
 class GenusClassifier(nn.Module):
 
-    def __init__(self, fused_dim: int, hidden_dim=744,  genus_n_classes=372):
+    def __init__(self, fused_dim: int, hidden_dim=744, genus_n_classes=372, dropout=0.1):
         super().__init__()
         self.genus_n_classes = genus_n_classes
 
         self.fused_dim = fused_dim
+        self.dropout = dropout
         self.decoder = nn.Sequential(
             nn.Linear(fused_dim, hidden_dim),
             nn.Sigmoid(),
+            nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, genus_n_classes)
         )
 
@@ -181,7 +192,8 @@ class LocalSpecieClassfier(nn.Module):
                  reduced_fused_dim=128,
                  max_specie_in_genus=23,
                  genus_embedding_dim=64,
-                 specie_decoder_hidden_dim=64
+                 specie_decoder_hidden_dim=64,
+                 dropout=0.1
                  ):
         super().__init__()
         # self.species2genus = torch.tensor(species2genus-1, dtype=torch.long)
@@ -191,6 +203,7 @@ class LocalSpecieClassfier(nn.Module):
         self.reduced_fused_dim = reduced_fused_dim
         self.max_specie_in_genus = max_specie_in_genus
         self.genus_embedding_dim = genus_embedding_dim
+        self.dropout = dropout
         # self.num_of_species = num_of_species
 
         self.fused_proj = nn.Linear(fused_dim, reduced_fused_dim)
@@ -198,6 +211,7 @@ class LocalSpecieClassfier(nn.Module):
         self.specie_decoder = nn.Sequential(
             nn.Linear(reduced_fused_dim+genus_embedding_dim, specie_decoder_hidden_dim),
             nn.Sigmoid(),
+            nn.Dropout(p=self.dropout),
             nn.Linear(specie_decoder_hidden_dim, max_specie_in_genus)
         )
 
@@ -217,8 +231,8 @@ class LocalSpecieClassfier(nn.Module):
         #     genus_logits = F.one_hot(teacher_genus.to(torch.long), num_classes=self.genus_predictor.genus_n_classes).to(torch.float32)
 
 
-        reduced_fused = self.fused_proj(fused_emb)
-        genus_emb = self.genus_embedder(genus_logits)
+        reduced_fused = F.dropout(self.fused_proj(fused_emb), self.dropout, training=self.training)
+        genus_emb = F.dropout(self.genus_embedder(genus_logits), self.dropout, training=self.training)
 
 
         # print(genus_logits.shape, "Genus Embedding Shape:", genus_emb.shape, "Reduced Fused Shape:", reduced_fused.shape)
@@ -229,32 +243,6 @@ class LocalSpecieClassfier(nn.Module):
         # return self._flatten_species_probs_batch(prob_matrix), local_specie_logits, genus_logits, fused_emb, reduced_fused
 
 
-def multimodal_collector(features):
-    batch = {}
-    keys = features[0].keys()
-    
-    if 'dna_len_tokens' in keys:
-        batch['dna_len_tokens'] = torch.cat([f['dna_len_tokens'] for f in features], dim=0)
-    if 'image_inputs' in keys:
-        batch['image_inputs'] = {
-            "pixel_values": torch.cat([f['image_inputs']['pixel_values'] for f in features], dim=0)
-        }
-    if 'genus' in keys:
-        batch['genus'] = torch.cat([f['genus'] for f in features], dim=0)
-    if 'labels' in keys:
-        batch['labels'] = torch.cat([f['labels'] for f in features], dim=0)
-    if 'dna_inputs' in keys:
-        batch['dna_inputs'] = {
-            "input_ids": torch.cat([f['dna_inputs']['input_ids'] for f in features], dim=0),
-            "attention_mask": torch.cat([f['dna_inputs']['attention_mask'] for f in features], dim=0)
-        }
-    if 'img_emb' in keys:
-        batch['img_emb'] = torch.cat([f['img_emb'] for f in features], dim=0)
-    if 'dna_emb' in keys:
-        batch['dna_emb'] = torch.cat([f['dna_emb'] for f in features], dim=0)
-
-    # print(batch.keys())
-    return batch
 
 class MainClassifier(nn.Module):
     def __init__(self, species2genus: list[int], genus_species: dict[int,list], 
@@ -263,8 +251,9 @@ class MainClassifier(nn.Module):
                 fusion_embedder: AttentionFusion,
                 genus_classifier: GenusClassifier,
                 local_specie_classifier: LocalSpecieClassfier,
-                alpha=0.7,
-                beta=0.3):
+                alpha=3,
+                beta=2,
+                theta=0.5,):
         super().__init__()
         self.species2genus = torch.tensor(species2genus-1, dtype=torch.long)
         self.genus_species = genus_species
@@ -284,9 +273,11 @@ class MainClassifier(nn.Module):
         self.optimizer = torch.optim.Adam(self.parameters(), lr=0.01)
         self.genus_criterion = nn.CrossEntropyLoss()
         self.specie_criterion = nn.CrossEntropyLoss()
+        self.total_criterion = nn.CrossEntropyLoss()
 
         self.alpha = alpha
         self.beta = beta
+        self.theta = theta
 
         # self.local_specie_labels = []
         # for label in labels:
@@ -295,22 +286,34 @@ class MainClassifier(nn.Module):
         #     if teacher_force:
         #         true_genus.append(g.item())
 
-    def _calculate_loss(self, logits, labels, genus_logits, genus_labels):
+    def _calculate_loss(self, logits, labels, genus_logits, genus_labels, local_specie_logits, local_specie_labels):
         # print("X", logits.shape, labels)
         # return self.specie_criterion(logits, labels.reshape(-1))
         
+        # if labels.ndim < 1:
+        #     labels = labels.unsqueeze(0)
+        # if genus_labels.ndim < 1:
+        #     genus_labels = genus_labels.unsqueeze(0)
+        # if local_specie_labels.ndim < 1:
+        #     local_specie_labels = local_specie_labels.unsqueeze(0)
 
-        if labels.ndim < 1:
-            labels = labels.unsqueeze(0)
-        if genus_labels.ndim < 1:
-            genus_labels = genus_labels.unsqueeze(0)
-
-        specie_loss = self.specie_criterion(logits, labels.squeeze(1) if labels.ndim > 1 else labels)
-        # if freeze_genus:
-        #     return specie_loss
+        if self.alpha == 0:
+            total_loss = 0
+        else:
+            total_loss = self.total_criterion(logits, labels.squeeze())
         
-        genus_loss = self.genus_criterion(genus_logits, genus_labels.squeeze(1) if genus_labels.ndim > 1 else genus_labels)
-        return self.alpha * genus_loss + self.beta * specie_loss
+        
+        if self.beta == 0:
+            genus_loss = 0
+        else:
+            genus_loss = self.genus_criterion(genus_logits, genus_labels.squeeze())
+
+        if self.theta == 0:
+            local_specie_loss = 0
+        else:
+            local_specie_loss = self.specie_criterion(local_specie_logits, local_specie_labels.squeeze())
+
+        return self.alpha * total_loss + self.beta * genus_loss + self.theta * local_specie_loss
     
 
     def _flatten_species_probs_batch(self, prob_matrix):
@@ -327,7 +330,8 @@ class MainClassifier(nn.Module):
         return result
 
 
-    def forward(self, dna_len_tokens, image_inputs=None, dna_inputs=None, dna_emb=None, img_emb=None ,genus=None, labels=None):
+    def forward(self, dna_len_tokens, image_inputs=None, dna_inputs=None, dna_emb=None, img_emb=None ,genus=None, local_specie_lbl=None, labels=None):
+
         # print("MainClassifier input:",'dna_len_tokens', dna_len_tokens.shape,
         #     #   'image_inputs', image_inputs['pixel_values'].shape if image_inputs is not None else None,
         #       'genus', genus.shape if genus is not None else None,
@@ -377,7 +381,7 @@ class MainClassifier(nn.Module):
         if labels is not None:
             if genus is None:
                 genus = self.species2genus[labels]
-            loss = self._calculate_loss(logits, labels, genus_logits, genus)
+            loss = self._calculate_loss(logits, labels, genus_logits, genus, local_specie_logits, local_specie_lbl)
 
         return {
             "logits": logits,
@@ -387,7 +391,7 @@ class MainClassifier(nn.Module):
             "loss": loss
         }
 
-    def fit(self, train_dataset, eval_dataset=None, output_dir=f"./results_{time.strftime('%Y%m%d%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200):
+    def fit(self, train_dataset, eval_dataset, output_dir=f"./results_{time.strftime('%Y%m%dT%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200):
 
         if self.dna_embedder:
             for param in self.dna_embedder.parameters():
@@ -409,13 +413,23 @@ class MainClassifier(nn.Module):
             num_train_epochs=epochs,
             weight_decay=0.01,
             logging_dir=f"{output_dir}/logs",
-            logging_steps=50,
-            load_best_model_at_end=True if eval_dataset is not None else False,
+            logging_steps=100,
+            do_train=True,
+            # load_best_model_at_end=True if eval_dataset is not None else False,
             report_to="none",   # disable W&B unless you want it
+            # metric_for_best_model="accuracy",   
+            greater_is_better=True,
+            lr_scheduler_type="linear",
+            warmup_steps=200,
         )
-
+        print(f"Training arguments: {training_args}")
         # Data collatordef compute_metrics(eval_pred):
 
+        
+        # def compute_metrics(eval_pred):
+        #     logits, labels = eval_pred
+        #     preds = np.argmax(logits, axis=-1)
+        #     return accuracy.compute(predictions=preds, references=labels)
     
         # Define Trainer
         trainer = Trainer(
@@ -423,129 +437,16 @@ class MainClassifier(nn.Module):
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
+            compute_metrics=compute_metrics,
             data_collator=multimodal_collector,
-            compute_metrics=compute_metrics
         )
 
         # Train
         trainer.train()
+
+        final_outdir = output_dir + "-final"
+        trainer.save_model(final_outdir)
+
+        print(f"Model saved to: {final_outdir}")
+
         return trainer
-
-    # def fit(self, train_dataset, val_dataset=None,  epochs=100, lr=0.01, eval_frequency=20, freeze_genus=False, teacher_force=False, batch_size=2):
-
-    #     start_time = time.strftime("%Y%m%d-%H%M%S")
-
-    #     if freeze_genus:
-    #         for param in self.genus_classifier.parameters():
-    #             param.requires_grad = False
-
-    #     # self.local_specie_labels = []
-    #     # true_genus = []
-    #     # for label in labels:
-    #     #     g = self.species2genus[label]
-    #     #     self.local_specie_labels.append(self.genus_species[g.item()].index(label))
-    #     #     if teacher_force:
-    #     #         true_genus.append(g.item())
-
-
-    #     log_file = open(f'output/{start_time}_log.txt', "w")
-    #     history_file = open(f'output/{start_time}_history.json', "w")
-
-    #     print(f"Fitting MainClassifier with {epochs=}, {lr=}", file=log_file, flush=True)
-
-    #     assert self.optimizer is not None, "optimizer must be set before fitting"
-
-    #     for param_group in self.optimizer.param_groups:
-    #         param_group['lr'] = lr
-
-    #     self.scheduler = lr_scheduler.OneCycleLR(self.optimizer, max_lr=lr, total_steps=epochs)
-
-    #     best_val_loss = float('inf')
-
-    #     history = {
-    #         'train_loss': [],
-    #         'val_loss': [],
-    #         'val_accuracy': [],
-    #         'val_ari': [],
-    #         'val_nmi': []
-    #     }
-        
-    #     self.train()
-
-    #     for epoch in range(epochs):
-    #         try:
-    #             self.optimizer.zero_grad()
-
-    #             batch_indices = torch.randperm(len(train_dataset))[:batch_size if batch_size is not None else len(train_dataset)]
-    #             train_data = train_dataset[batch_indices]
-    #             train_labels = train_data['labels']
-    #             train_result = self.forward(**train_data)
-    #             train_loss = train_result['loss']
-    #             train_outputs_logits = train_result['logits']
-                
-    #             train_loss.backward()
-    #             self.optimizer.step()
-
-    #             if hasattr(self, 'scheduler') and self.scheduler is not None:
-    #                 self.scheduler.step()
-
-    #             history['train_loss'].append(train_loss.item())
-
-    #             train_missclass = (train_labels.cpu().numpy() != torch.argmax(train_outputs_logits, dim=-1).cpu().numpy()).sum().item()
-
-                
-    #             if val_dataset and (epoch + 1) % eval_frequency == 0:
-    #                 self.eval()
-                    
-    #                 batch_indices = torch.randperm(len(val_dataset))[:batch_size if batch_size is not None else len(val_dataset)]
-    #                 val_data = val_dataset[batch_indices]
-    #                 val_labels = val_data['labels']
-    #                 val_result = self.forward(**val_data)
-    #                 val_loss = val_result['loss']
-    #                 val_outputs_logits = val_result['logits']
-        
-    #                 # Get predictions
-    #                 predictions = torch.argmax(val_outputs_logits, dim=-1)
-                    
-    #                 # Convert to numpy for sklearn metrics
-    #                 val_truth_np = val_labels.cpu().squeeze().numpy()
-    #                 predictions_np = predictions.cpu().numpy()
-                    
-    #                 print(val_truth_np.shape, predictions_np.shape, "Val Truth and Predictions Shape")
-    #                 # Calculate metrics
-    #                 accuracy = accuracy_score(val_truth_np, predictions_np)
-    #                 ari = adjusted_rand_score(val_truth_np, predictions_np)
-    #                 nmi = normalized_mutual_info_score(val_truth_np, predictions_np)
-                    
-    #                 val_metrics = {
-    #                     'loss': val_loss.item(),
-    #                     'accuracy': accuracy,
-    #                     'ari': ari,
-    #                     'nmi': nmi
-    #                 }
-                    
-    #                 self.train()
-
-    #                 history['val_loss'].append(val_metrics['loss'])
-    #                 history['val_accuracy'].append(val_metrics['accuracy'])
-    #                 history['val_ari'].append(val_metrics['ari'])
-    #                 history['val_nmi'].append(val_metrics['nmi'])
-
-    #                 if val_loss < best_val_loss:
-    #                     best_val_loss = val_metrics['loss']
-    #                     torch.save(self.state_dict(), f'output/{start_time}_best_specie_predictor.pt')
-
-    #                 misclassification = (val_truth_np != predictions_np).sum()
-    #                 print(f"Epoch {epoch+1}/{epochs}, Loss: {train_loss.item():.5f}, LR: {self.optimizer.param_groups[0]['lr']:.5f}, Train Miss: {train_missclass}, Val Loss: {val_loss:.5f}, Val Miss: {misclassification}, Val Metrics: {val_metrics}", file=log_file, flush=True)
-    #             else:
-    #                 print(f"Epoch {epoch+1}/{epochs}, Loss: {train_loss.item():.5f}, LR: {self.optimizer.param_groups[0]['lr']:.5f}, Train Miss: {train_missclass}", file=log_file, flush=True)
-    #         except KeyboardInterrupt:
-    #             print("KeyboardInterrupt detected, stopping fit", file=log_file, flush=True)
-    #             break
-
-    #     log_file.close()
-
-    #     json.dump(history, fp=history_file)
-    #     history_file.close()
-
-    #     return history

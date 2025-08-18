@@ -22,6 +22,13 @@ class MultiModalDataset:
         self.dna_embeddings = dna_embeddings
         self.img_embeddings = img_embeddings
 
+        self.local_species_label = []
+        for label in labels:
+            label = label-1
+            g = self.species2genus[label]
+            self.local_species_label.append(self.genus_species[g.item()].index(label))
+            
+
         self.v_dna_str_len = np.vectorize(_dna_str_len)
         self.v_dna_len_token = np.vectorize(lambda x: self.dna_str_len_mapping[x] if x in self.dna_str_len_mapping else -1)
 
@@ -40,6 +47,7 @@ class MultiModalDataset:
         res = {
             'dna_len_tokens': torch.tensor(dna_len_token, dtype=torch.long).reshape(-1, 1),
             'labels': label,
+            'local_specie_lbl': torch.tensor(self.local_species_label[label], dtype=torch.long).reshape(-1, 1),
         }
 
         # ===== Image Processing =====
