@@ -387,7 +387,7 @@ class MainClassifier(nn.Module):
             "loss": loss
         }
 
-    def fit(self, train_dataset, eval_dataset=None, output_dir=f"./results_{time.strftime('%Y%m%d%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50):
+    def fit(self, train_dataset, eval_dataset=None, output_dir=f"./results_{time.strftime('%Y%m%d%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200):
 
         if self.dna_embedder:
             for param in self.dna_embedder.parameters():
@@ -399,11 +399,11 @@ class MainClassifier(nn.Module):
         # HuggingFace TrainingArguments
         training_args = TrainingArguments(
             output_dir=output_dir,
-            eval_strategy="epoch" if eval_dataset is not None else "no",
-            save_strategy="epoch",
+            eval_strategy="steps" if eval_dataset is not None else "no",
+            save_strategy="steps",
             learning_rate=lr,
-            eval
             eval_steps=eval_steps if eval_dataset is not None else None,
+            save_steps=save_steps,
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=batch_size,
             num_train_epochs=epochs,
