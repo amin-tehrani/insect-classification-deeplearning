@@ -70,8 +70,17 @@ class AttentionFusion(nn.Module):
         # dna_emb: [batch, dna_dim]
         # img_emb: [batch, img_dim]
         # Project into same space
-        # print(dna_len_tokens.shape)
-        dna_len_emb = self.dna_len_emb(dna_len_tokens).unsqueeze(1)  # [batch, dna_len_dim]
+        # print("dna_len_tokens.shape",dna_len_tokens.shape)
+        
+        dna_len_emb = self.dna_len_emb(dna_len_tokens)  # [batch, dna_len_dim]
+
+
+        # print("dna_len_emb.shape",dna_len_emb.shape)
+
+        if len(dna_len_emb.shape) == 2:
+            dna_len_emb = dna_len_emb.unsqueeze(1)
+
+        # print("dna_len_emb.shape",dna_len_emb.shape)
 
         if self.proj_dna_dim is not None:
             dna_proj = self.proj_dna(dna_emb).unsqueeze(1)  # [batch, 1, proj_dna_dim]
@@ -84,6 +93,7 @@ class AttentionFusion(nn.Module):
             img_proj = img_emb.unsqueeze(1)
 
         # print(dna_len_emb.shape, dna_proj.shape, img_proj.shape)
+        
         
         
         dna_final_emb = torch.cat([self.weight_dna_len * dna_len_emb, self.weight_dna * dna_proj], dim=2)  # [batch, 1, dna_len_dim + dna_dim]
@@ -323,8 +333,8 @@ class LocalSpecieClassfier(nn.Module):
 
 
         # print(genus_logits.shape, "Genus Embedding Shape:", genus_emb.shape, "Reduced Fused Shape:", reduced_fused.shape)
-        
-        genus_fused = torch.cat([genus_emb, reduced_fused, ], dim=1)
+
+        genus_fused = torch.cat([genus_emb, reduced_fused], dim=1)
         return self.specie_decoder(genus_fused) # size: [batch_size, max_specie_in_genus]
 
         # return self._flatten_species_probs_batch(prob_matrix), local_specie_logits, genus_logits, fused_emb, reduced_fused
@@ -343,6 +353,15 @@ def multimodal_collator(features):
     # Combine image_inputs correctly
     image_keys = features[0]["image_inputs"].keys()
     batch["image_inputs"] = {k: torch.cat([f["image_inputs"][k] for f in features], dim=0) for k in image_keys}
+
+    if "dna_emb" in features[0]:
+        batch["dna_emb"] = torch.stack([f["dna_emb"] for f in features])
+
+    # Combine img encoding if available
+    if "img_emb" in features[0]:
+        batch["img_emb"] = torch.stack([f["img_emb"] for f in features])
+
+    
 
     return batch
 
@@ -389,6 +408,11 @@ class MainClassifier(nn.Module):
         # local_specie_label = torch.tensor(self.local_specie_labels, dtype=torch.long)[specie_labels]
         # print("Logits shape:", logits.shape, "Labels shape:", labels.shape, "Genus logits shape:", genus_logits.shape, "Genus labels shape:", genus_labels.shape if genus_labels is not None else None)
         
+        if labels.ndim < 1:
+            labels = labels.unsqueeze(0)
+        if genus_labels.ndim < 1:
+            genus_labels = genus_labels.unsqueeze(0)
+
         specie_loss = self.specie_criterion(logits, labels.squeeze(1) if labels.ndim > 1 else labels)
         # if freeze_genus:
         #     return specie_loss
@@ -398,22 +422,28 @@ class MainClassifier(nn.Module):
     
 
     def _flatten_species_probs_batch(self, prob_matrix):
+        print("prob_matrix shape:", prob_matrix.shape)
         B = prob_matrix.size(0)
         result = torch.zeros(B, self.num_of_species, dtype=prob_matrix.dtype, device=prob_matrix.device)
-    
+        print("result shape:", result)
+        print("Species2Genus Shape:", self.species2genus.shape, "Genus Species Shape:", len(self.genus_species))
         for genus_id, species_ids in self.genus_species.items():
             n = len(species_ids)
+            print("\t", n, genus_id, species_ids)
             result[:, species_ids] = prob_matrix[:, genus_id, :n]
     
         return result
 
 
-    def forward(self, dna_len_tokens, image_inputs, dna_inputs, genus=None, labels=None):
+    def forward(self, dna_len_tokens, image_inputs, dna_inputs, dna_emb=None, img_emb=None ,genus=None, labels=None):
         dna_len_tokens = dna_len_tokens.unsqueeze(0) if dna_len_tokens.ndim == 0 else dna_len_tokens
 
         with torch.no_grad():  # extra safety, avoids computing grads
-            dna_emb = self.dna_embedder(**dna_inputs).last_hidden_state[:, 0, :]
-            img_emb = self.img_embedder(**image_inputs).last_hidden_state[:, 0, :]
+            if dna_emb is None:
+                dna_emb = self.dna_embedder(**dna_inputs).last_hidden_state[:, 0, :]
+            if img_emb is None:
+                img_emb = self.img_embedder(**image_inputs).last_hidden_state[:, 0, :]
+
         
         # print("DNA Embedding Shape:", dna_emb.shape, "Image Embedding Shape:", img_emb.shape)
 
@@ -425,12 +455,17 @@ class MainClassifier(nn.Module):
         # print("genus_logits1 shape:", genus_logits.shape)
 
         if genus is not None: # Teacher forcing
-            genus_logits = F.one_hot(genus, num_classes=self.genus_classifier.genus_n_classes).squeeze(1).to(torch.float32)
+            genus_logits = F.one_hot(genus, num_classes=self.genus_classifier.genus_n_classes).squeeze().to(torch.float32)
+
+
+        if len(genus_logits.shape) <= 1:
+            genus_logits = genus_logits.unsqueeze(0)
 
         # print("genus_logits2 shape:", genus_logits.shape)
 
         local_specie_logits = self.local_specie_classifier(fused_emb, genus_logits)
         # print("local_specie_logits shape:", local_specie_logits.shape)
+
 
         prob_matrix = genus_logits.unsqueeze(2) * local_specie_logits.unsqueeze(1)     # size: [batch_size, max_specie_in_genus]
 

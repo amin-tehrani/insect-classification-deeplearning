@@ -6,7 +6,7 @@ def _dna_str_len(s):
     return len(s.strip())
 
 class MultiModalDataset:
-    def __init__(self, dna_strings, images, labels, dna_str_len_mapping, species2genus, genus_species, img_processor, dna_tokenizer, add_genus=True, max_length=1600):
+    def __init__(self, dna_strings, images, labels, dna_str_len_mapping, species2genus, genus_species, img_processor, dna_tokenizer, dna_embeddings=None, img_embeddings=None, add_genus=True, max_length=1600):
         self.images = images
         self.dna_strings = np.array(dna_strings, dtype=np.str_)
         self.labels = np.array(labels, dtype=np.int64)
@@ -18,6 +18,8 @@ class MultiModalDataset:
         self.genus_species = genus_species
         self.add_genus = add_genus
         
+        self.dna_embeddings = dna_embeddings
+        self.img_embeddings = img_embeddings
 
         self.v_dna_str_len = np.vectorize(_dna_str_len)
         self.v_dna_len_token = np.vectorize(lambda x: self.dna_str_len_mapping[x] if x in self.dna_str_len_mapping else -1)
@@ -53,6 +55,7 @@ class MultiModalDataset:
             return_tensors='pt'
         )
         
+        
         # ===== Label & Genus =====
         label = torch.tensor(self.labels[idx].squeeze(), dtype=torch.long) - 1
         genus = torch.tensor(self.species2genus[label], dtype=torch.long).squeeze()
@@ -65,6 +68,10 @@ class MultiModalDataset:
         } 
         if self.add_genus:
             res['genus'] = genus
-            
-        return res
 
+        if self.dna_embeddings is not None:
+            res['dna_emb'] = torch.tensor(self.dna_embeddings[idx], dtype=torch.float32)
+        if self.img_embeddings is not None:
+            res['img_emb'] = torch.tensor(self.img_embeddings[idx], dtype=torch.float32)
+
+        return res

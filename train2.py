@@ -41,15 +41,15 @@ print("Max specie in genus: ", max_specie_in_genus)
 
 
 # %%
-# from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA
 
-# pca = PCA(n_components=512)
-# all_dna_features_cnn_pca = pca.fit_transform(mat['all_dna_features_cnn_new'])
+pca = PCA(n_components=512)
+all_dna_features_cnn_pca = np.array(pca.fit_transform(mat['all_dna_features_cnn_new']))
 
 
 # %%
-# pca = PCA(n_components=512)
-# all_image_features_gan_pca = pca.fit_transform(mat['all_image_features_gan'])
+pca = PCA(n_components=768)
+all_image_features_gan_pca = np.array(pca.fit_transform(mat['all_image_features_gan']))
 
 # %%
 # mat['species2genus'].shape
@@ -98,7 +98,8 @@ dna_tokenizer, dna_encoder = get_tokenizer_encoder("./dnaencoder-finetuned175510
 # get_dna_embedding(mat['all_string_dnas'][:2], dna_tokenizer, dna_encoder).shape
 
 # %%
-dataset = MultiModalDataset(mat['all_string_dnas'], mat['all_images'], np.transpose(mat['all_labels'], (1,0)), all_dna_len_tokens, species2genus, genus_species, img_processor, dna_tokenizer)
+dataset = MultiModalDataset(mat['all_string_dnas'], mat['all_images'], np.transpose(mat['all_labels'], (1,0)), dna_str_len_mapping, species2genus, genus_species, img_processor, dna_tokenizer, 
+                            dna_embeddings=all_dna_features_cnn_pca, img_embeddings=all_image_features_gan_pca)
 
 # %%
 from models import AttentionFusion, GenusClassifier, LocalSpecieClassfier, MainClassifier
@@ -112,20 +113,24 @@ local_specie_classifier = LocalSpecieClassfier(fusion_embedder.fused_dim)
 
 main_classifier = MainClassifier(mat['species2genus'], genus_species, dna_encoder, img_encoder, fusion_embedder, genus_classifier, local_specie_classifier).to(device)
 
-
-from models import multimodal_collator
+# for (x,d) in zip(all_dna_len_tokens, dataset):
+#     print(x,"\t" ,d['dna_len_tokens'], d['labels'],d['genus'])
+# from models import multimodal_collator
 # print(main_classifier(**multimodal_collator([dataset[0], dataset[1]])))
+# print(main_classifier(**dataset[0]))
+
+
 
 train_indices = (mat['train_loc'] - 1).flatten()  # Get train indices
 val_indices = (mat['val_seen_loc'] - 1).flatten()  # Get validation indices
 
-val_dataset = MultiModalDataset(mat['all_string_dnas'][val_indices], mat['all_images'][val_indices], np.transpose(mat['all_labels'], (1,0))[val_indices], all_dna_len_tokens[val_indices], species2genus, genus_species, img_processor, dna_tokenizer)
-train_dataset = MultiModalDataset(mat['all_string_dnas'][train_indices], mat['all_images'][train_indices], np.transpose(mat['all_labels'], (1,0))[train_indices], all_dna_len_tokens[train_indices], species2genus, genus_species, img_processor, dna_tokenizer)
+train_dataset = MultiModalDataset(mat['all_string_dnas'][train_indices], mat['all_images'][train_indices], np.transpose(mat['all_labels'], (1,0))[train_indices], dna_str_len_mapping, species2genus, genus_species, img_processor, dna_tokenizer, dna_embeddings=all_dna_features_cnn_pca[train_indices], img_embeddings=all_image_features_gan_pca[train_indices])
+val_dataset = MultiModalDataset(mat['all_string_dnas'][val_indices], mat['all_images'][val_indices], np.transpose(mat['all_labels'], (1,0))[val_indices], dna_str_len_mapping, species2genus, genus_species, img_processor, dna_tokenizer, dna_embeddings=all_dna_features_cnn_pca[val_indices], img_embeddings=all_image_features_gan_pca[val_indices])
 
-import os
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# # import os
+# # os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+# # os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# # # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 print(main_classifier.fit(train_dataset, val_dataset, batch_size=8))
 
