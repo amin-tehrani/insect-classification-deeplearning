@@ -176,14 +176,31 @@ def finetune_on_species(mat: dict, outdir="./dnaencoder-finetuned"+str(int(time.
     print(f"Model saved to: {final_outdir}")
 
 
-
 def get_tokenizer_encoder(model_name="./dnaencoder-finetuned-final", device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModel.from_pretrained(model_name, trust_remote_code=True).to(device)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, trust_remote_code=True).to(device)
 
-    return tokenizer, model
 
+    return tokenizer, model.base_model
+
+
+def get_dna_embedding(dnas, tokenizer, model, device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+
+    print(type(dnas))
+    # Prepare inputs
+    inputs = tokenizer(dnas.tolist(), truncation=True,
+            padding='max_length',
+            max_length=1600,
+            return_tensors='pt').to(device)
+    
+    # Forward pass
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    # CLS token embedding (first token)
+    cls_embeds = outputs.last_hidden_state[:, 0, :]
+    return cls_embeds
 
 def evaluate_model(mat,model_name="./dnaencoder-finetuned-final", device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
     
@@ -197,8 +214,8 @@ def evaluate_model(mat,model_name="./dnaencoder-finetuned-final", device=torch.d
     # config = AutoConfig.from_pretrained(model_name)
 
     # Load tokenizer and model
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, token=hf_token)
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, trust_remote_code=True,  token=hf_token).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, trust_remote_code=True).to(device)
 
     # model.load_state_dict(load_file(join(model_name, "model.safetensors")))
 

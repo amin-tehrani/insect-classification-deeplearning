@@ -145,12 +145,16 @@ def get_processor_encoder(model_name="./vit-finetuned-best-final", device = torc
 
     return tokenizer, model
 
-def get_cls_embedding(images, processor, model, device=None):
+def get_img_embedding(images, processor, model, device=None):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Prepare inputs
-    inputs = processor(images, return_tensors="pt").to(device)
+    images = np.transpose(images,(0, 2, 3, 1))  # CHW -> HWC
+    if images.max() <= 1.0:  # If normalized to [0,1], scale to [0,255]
+        images = (images * 255).astype(np.uint8)
+
+        # Process image
+    inputs = processor(images=images, return_tensors="pt").to(device)
     
     # Forward pass
     with torch.no_grad():
