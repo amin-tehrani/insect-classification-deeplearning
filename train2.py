@@ -82,7 +82,7 @@ deviceCPU = torch.device("cpu")
 device = deviceCPU
 print("Device:", device)
 
-from dataset import MultiModalDataset
+from multimodal_dataset import MultiModalDataset
 # %%
 import vit
 reload(vit)

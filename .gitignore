@@ -6,3 +6,4 @@ output
 /dnaencoder-finetuned*
 /vit-finetuned*
 *.sif
+/results_*

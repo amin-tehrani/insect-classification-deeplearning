@@ -7,7 +7,7 @@ import torchviz
 import scipy.io
 from matplotlib import pyplot as plt
 import numpy as np
-import dataset
+import multimodal_dataset
 import dnaencoder
 from importlib import reload
 from sklearn.decomposition import PCA
