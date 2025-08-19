@@ -51,14 +51,13 @@ def multimodal_collector(features):
     return batch
 
 class AttentionFusion(nn.Module):
-    def __init__(self, dna_dim, img_dim, fused_dim=None, dna_len_dim=16, num_distinct_dna_len=120, proj_dna_dim=None, proj_img_dim=None, num_heads=None, dropout=0.1):
+    def __init__(self, dna_dim, img_dim, fused_dim=None, dna_len_dim=16, num_distinct_dna_len=120, proj_dna_dim=None, proj_img_dim=None, dropout=0.1):
         super().__init__()
 
         self.dna_dim=dna_dim
         self.img_dim=img_dim
         self._fused_dim = fused_dim
         self.dna_len_dim=dna_len_dim
-        self.num_heads=num_heads
         self.proj_dna_dim=proj_dna_dim
         self.proj_img_dim=proj_img_dim
 
@@ -72,16 +71,13 @@ class AttentionFusion(nn.Module):
         # self.proj_dna = nn.Linear(dna_dim, fused_dim-dna_len_dim)
         # self.proj_img = nn.Linear(img_dim, fused_dim)
         
-        self.weight_dna_len = nn.Parameter(torch.ones(1))
-        self.weight_dna = nn.Parameter(torch.ones(1))
-        self.weight_img = nn.Parameter(torch.ones(1))
+        self.weight_dna_len = nn.Linear(dna_len_dim, 1, bias=False)
+        self.weight_dna = nn.Linear(dna_dim, 1, bias=False)
+        self.weight_img = nn.Linear(img_dim, 1, bias=False)
 
         self.dropout = dropout
 
         # Attention layer
-        if num_heads:
-            self.attn = nn.MultiheadAttention(embed_dim=self.concatenated_dim, num_heads=num_heads, batch_first=True)
-        
         
         # Optional: feed-forward layer after attention
         self.ffn = nn.Sequential(
@@ -123,9 +119,6 @@ class AttentionFusion(nn.Module):
 
         # print("dna_len_emb.shape",dna_len_emb.shape)
 
-        if len(dna_len_emb.shape) == 2:
-            dna_len_emb = dna_len_emb
-
         # print("dna_len_emb.shape",dna_len_emb.shape)
 
         if self.proj_dna_dim is not None:
@@ -140,46 +133,46 @@ class AttentionFusion(nn.Module):
 
         # print(dna_len_emb.shape, dna_proj.shape, img_proj.shape)
         
+        dna_len_attn = self.weight_dna_len(dna_len_emb)
+        dna_attn = self.weight_dna(dna_emb)
+        img_attn = self.weight_img(img_emb)
         
-        
-        dna_final_emb = torch.cat([self.weight_dna_len * dna_len_emb, self.weight_dna * dna_proj], dim=1)  # [batch, 1, dna_len_dim + dna_dim]
+        dna_final_emb = torch.cat([dna_len_attn * dna_len_emb, dna_attn * dna_proj], dim=1)  # [batch, 1, dna_len_dim + dna_dim]
 
-        seq = torch.cat([dna_final_emb, self.weight_img *img_proj], dim=1)  # [batch, concat_dim]
+        seq = torch.cat([dna_final_emb, img_attn *img_proj], dim=1)  # [batch, concat_dim]
         
-        if self.num_heads:
-            # Self-attention
-            fused, _ = self.attn(seq, seq, seq)  # [batch, concat_dim]
-        else:
-            fused = seq
-        
+                
         
         
         # Aggregate embelddings (mean pooling)
         # fused = attn_out.mean(dim=1)  # [batch, D]
         
         # Optional FFN
-        fused = self.ffn(fused)
-        return fused
+        fused = self.ffn(seq)
+        return fused, dna_len_emb
 
     
 class GenusClassifier(nn.Module):
 
-    def __init__(self, fused_dim: int, hidden_dim=744, genus_n_classes=372, dropout=0.1):
+    def __init__(self, fused_dim: int, hidden_dim=744, genus_n_classes=372, dropout=0.1, dna_len_dim=16):
         super().__init__()
         self.genus_n_classes = genus_n_classes
 
         self.fused_dim = fused_dim
+        self.dna_len_dim = dna_len_dim
         self.dropout = dropout
         self.decoder = nn.Sequential(
-            nn.Linear(fused_dim, hidden_dim),
+            nn.Linear(dna_len_dim+fused_dim, hidden_dim),
             nn.Sigmoid(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, genus_n_classes)
         )
 
-    def forward(self, fused_emb):
+    def forward(self, fused_emb, dna_len_token):
         # fused = self.fused_dim(dna_len_tokens, dna_emb, img_emb)
-        x = self.decoder(fused_emb)
+        # print("dna_len_token shape:", dna_len_token.shape, "fused_emb shape:", fused_emb.shape)
+        x = torch.cat([dna_len_token, fused_emb], dim=1)  # [batch, dna_len_dim + fused_dim]
+        x = self.decoder(x)
         logits = torch.softmax(x, dim=1)
         return logits
     
@@ -193,7 +186,8 @@ class LocalSpecieClassfier(nn.Module):
                  max_specie_in_genus=23,
                  genus_embedding_dim=64,
                  specie_decoder_hidden_dim=64,
-                 dropout=0.1
+                 dropout=0.1,
+                 dna_len_dim=16
                  ):
         super().__init__()
         # self.species2genus = torch.tensor(species2genus-1, dtype=torch.long)
@@ -204,12 +198,13 @@ class LocalSpecieClassfier(nn.Module):
         self.max_specie_in_genus = max_specie_in_genus
         self.genus_embedding_dim = genus_embedding_dim
         self.dropout = dropout
+        self.dna_len_dim = dna_len_dim
         # self.num_of_species = num_of_species
 
         self.fused_proj = nn.Linear(fused_dim, reduced_fused_dim)
         self.genus_embedder = nn.Linear(genus_n_classes, genus_embedding_dim)
         self.specie_decoder = nn.Sequential(
-            nn.Linear(reduced_fused_dim+genus_embedding_dim, specie_decoder_hidden_dim),
+            nn.Linear(dna_len_dim+reduced_fused_dim+genus_embedding_dim, specie_decoder_hidden_dim),
             nn.Sigmoid(),
             nn.Dropout(p=self.dropout),
             nn.Linear(specie_decoder_hidden_dim, max_specie_in_genus)
@@ -223,7 +218,7 @@ class LocalSpecieClassfier(nn.Module):
         # self.beta = beta
 
 
-    def forward(self, fused_emb, genus_logits):
+    def forward(self, fused_emb, dna_len_token, genus_logits):
         # genus_logits, fused_emb = self.genus_predictor(dna_len_tokens, dna_emb, img_emb)
 
         # if teacher_genus is not None:
@@ -237,7 +232,7 @@ class LocalSpecieClassfier(nn.Module):
 
         # print(genus_logits.shape, "Genus Embedding Shape:", genus_emb.shape, "Reduced Fused Shape:", reduced_fused.shape)
 
-        genus_fused = torch.cat([genus_emb, reduced_fused], dim=1)
+        genus_fused = torch.cat([dna_len_token, genus_emb, reduced_fused], dim=1)
         return self.specie_decoder(genus_fused) # size: [batch_size, max_specie_in_genus]
 
         # return self._flatten_species_probs_batch(prob_matrix), local_specie_logits, genus_logits, fused_emb, reduced_fused
@@ -351,10 +346,10 @@ class MainClassifier(nn.Module):
         
         # print("DNA Embedding Shape:", dna_emb.shape, "Image Embedding Shape:", img_emb.shape)
 
-        fused_emb = self.fusion_embedder(dna_len_tokens, dna_emb, img_emb)  # [batch_size, fused_dim]
+        fused_emb, dna_len_emb = self.fusion_embedder(dna_len_tokens, dna_emb, img_emb)  # [batch_size, fused_dim]
 
         # print("Fused Embedding Shape:", fused_emb.shape)
-        genus_logits = self.genus_classifier(fused_emb)
+        genus_logits = self.genus_classifier(fused_emb, dna_len_emb)
 
         # print("genus_logits1 shape:", genus_logits.shape)
 
@@ -368,7 +363,7 @@ class MainClassifier(nn.Module):
 
         # print("genus_logits2 shape:", genus_logits.shape)
 
-        local_specie_logits = self.local_specie_classifier(fused_emb, genus_logits)
+        local_specie_logits = self.local_specie_classifier(fused_emb, dna_len_emb, genus_logits)
         # print("local_specie_logits shape:", local_specie_logits.shape)
 
 

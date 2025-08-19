@@ -126,15 +126,15 @@ reload(models)
 from models import AttentionFusion, GenusClassifier, LocalSpecieClassfier, MainClassifier, multimodal_collector
 
 def get_main_classifier():
-    fusion_embedder = AttentionFusion(dna_dim=512,img_dim=768,dna_len_dim=16, fused_dim=512, proj_dna_dim=512-16, proj_img_dim=512, num_heads=None, dropout=0.0)
+    fusion_embedder = AttentionFusion(dna_dim=512,img_dim=768,dna_len_dim=32, fused_dim=258, proj_dna_dim=128-32, proj_img_dim=128, dropout=0.2)
     print("Fusion model created. fused dim: ", fusion_embedder.fused_dim)
-    genus_classifier = GenusClassifier(fusion_embedder.fused_dim,dropout=0.0)
+    genus_classifier = GenusClassifier(fusion_embedder.fused_dim,dropout=0.1, dna_len_dim=32)
 
-    local_specie_classifier = LocalSpecieClassfier(fusion_embedder.fused_dim,reduced_fused_dim=256, specie_decoder_hidden_dim=128, dropout=0.0,)
+    local_specie_classifier = LocalSpecieClassfier(fusion_embedder.fused_dim,reduced_fused_dim=128, specie_decoder_hidden_dim=256, dropout=0.1,dna_len_dim=32)
 
     return MainClassifier(mat['species2genus'], genus_species, None, None, fusion_embedder, genus_classifier,
                           local_specie_classifier,
-                          alpha=3, beta=0, theta=0,
+                          alpha=2, beta=0, theta=0,
                           ).to(device)
 
 main_classifier = get_main_classifier()
