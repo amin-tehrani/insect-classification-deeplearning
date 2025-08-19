@@ -73,7 +73,7 @@ def finetune_on_species(mat: dict, outdir="./dnaencoder-finetuned"+str(int(time.
     # Check if outdir exists, then create another outdir
     _i = 2
     while os.path.exists(outdir):
-        outdir = "./dnabert-finetuned" + str(_i)
+        outdir = "./dnaencoder-finetuned" + str(_i)
         _i += 1
 
     print("Outdir: ", outdir)
@@ -299,7 +299,7 @@ if __name__ == "__main__":
     assert len(sys.argv) > 1, "Please provide an argument (finetune, evaluate)"
     
     if sys.argv[1].strip().lower() == "finetune":
-        print("Task: finetune DNABERT")
+        print("Task: finetune dnaencoder")
         print("Loading mat file...")
         from mat import mat
         print("Mat loaded")
@@ -313,7 +313,7 @@ if __name__ == "__main__":
         if len(sys.argv) > 2:
             model_name = sys.argv[2]
         else:
-            model_name = "./dnabert-finetuned-final"
+            model_name = "./dnaencoder-finetuned-final"
 
         print("Task: evaluate DNAENCODER, model:", model_name)
 
