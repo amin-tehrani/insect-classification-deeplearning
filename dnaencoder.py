@@ -59,7 +59,7 @@ class DNADataset(Dataset):
             max_length=self.max_length,
             return_tensors='pt'
         )
-
+        
         
         return {
             'input_ids': encoding['input_ids'].squeeze(0),
@@ -205,11 +205,6 @@ def evaluate_model(mat,model_name="./dnaencoder-finetuned-final", device=torch.d
     
     print(f"Evaluating model: {model_name}")
     
-    # Get HuggingFace token
-    hf_token = os.getenv("HF_TOKEN")
-    if not hf_token:
-        print("Warning: HF_TOKEN not found in environment variables")
-    
     # config = AutoConfig.from_pretrained(model_name)
 
     # Load tokenizer and model
@@ -218,11 +213,12 @@ def evaluate_model(mat,model_name="./dnaencoder-finetuned-final", device=torch.d
 
     # model.load_state_dict(load_file(join(model_name, "model.safetensors")))
 
-    # Load your data
     dna_strings = mat['all_string_dnas'].squeeze()
     all_labels = mat['all_labels'].squeeze()
     val_indices = (mat['val_seen_loc'] - 1).flatten()  # Get validation indices
-    test_indices = (mat['val_unseen_loc'] - 1).flatten()
+    val_u_indices = (mat['val_unseen_loc'] - 1).flatten()
+    test_indices = (mat['test_seen_loc'] - 1).flatten()
+    test_u_indices = (mat['test_unseen_loc'] - 1).flatten()
 
     # Convert labels to class indices if needed
     if len(all_labels.shape) > 1:
@@ -238,27 +234,32 @@ def evaluate_model(mat,model_name="./dnaencoder-finetuned-final", device=torch.d
     val_dna_strings = dna_strings[val_indices]
     val_labels = labels[val_indices]
 
+    val_u_dna_strings = dna_strings[val_u_indices]
+    val_u_labels = labels[val_u_indices]
+
     test_dna_strings = dna_strings[test_indices]
     test_labels = labels[test_indices]
 
+    test_u_dna_strings = dna_strings[test_u_indices]
+    test_u_labels = labels[test_u_indices]
+
     print(f"Validation samples: {len(val_dna_strings)}")
 
-    # Create dataset
     val_dataset = DNADataset(val_dna_strings, val_labels, tokenizer)
-
-    # Create dataset
+    val_u_dataset = DNADataset(val_u_dna_strings, val_u_labels, tokenizer)
     test_dataset = DNADataset(test_dna_strings, test_labels, tokenizer)
+    test_u_dataset = DNADataset(test_u_dna_strings, test_u_labels, tokenizer)
 
     # Training arguments (needed for Trainer even in evaluation mode)
     training_args = TrainingArguments(
-        output_dir="./eval_temp",
-        per_device_eval_batch_size=16,
+        per_device_eval_batch_size=32,
         remove_unused_columns=False,
         dataloader_pin_memory=False,
     )
 
     # Data collator
     data_collator = DefaultDataCollator()
+
 
     # Create trainer just for evaluation
     val_trainer = Trainer(
@@ -269,14 +270,24 @@ def evaluate_model(mat,model_name="./dnaencoder-finetuned-final", device=torch.d
         compute_metrics=compute_metrics
     )
 
-    # Evaluate
-    print("Starting validation evaluation...")
+    print("Evaluating validation dataset...")
     val_results = val_trainer.evaluate()
+
+    val_u_trainer = Trainer(
+        model=model,
+        args=training_args,
+        eval_dataset=val_u_dataset,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics
+    )
+
+    print("Evaluating validation dataset...")
+    val_u_results = val_u_trainer.evaluate()
 
     test_trainer = Trainer(
         model=model,
         args=training_args,
-        eval_dataset=val_dataset,
+        eval_dataset=test_dataset,
         data_collator=data_collator,
         compute_metrics=compute_metrics
     )
@@ -284,8 +295,25 @@ def evaluate_model(mat,model_name="./dnaencoder-finetuned-final", device=torch.d
     # Evaluate
     print("Starting test evaluation...")
     test_results = test_trainer.evaluate()
+
+    test_u_trainer = Trainer(
+        model=model,
+        args=training_args,
+        eval_dataset=test_u_dataset,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics
+    )
+
+    # Evaluate
+    print("Starting test unseen evaluation...")
+    test_u_results = test_u_trainer.evaluate()
     
-    return val_results, test_results
+    return {
+        "val_seen": val_results,
+        "val_unseen": val_u_results,
+        "test_seen": test_results,
+        "test_unseen": test_u_results
+    }.items()
 
 
 if __name__ == "__main__":

@@ -169,33 +169,16 @@ def evaluate_model(mat, model_name="./vit-finetuned-final", device = torch.devic
     processor = AutoImageProcessor.from_pretrained(model_name)
     model = AutoModelForImageClassification.from_pretrained(model_name).to(device)
 
-    # Load your data
-    # Assuming mat is already loaded (e.g., from scipy.io.loadmat or similar)
-    all_images = torch.tensor(mat['all_images']).to(device)  # Shape: (32424, 3, 64, 64)
-    all_labels = torch.tensor(mat['all_labels'].squeeze()).to(device) 
-    val_indices = (mat['val_seen_loc']-1).flatten()      # Get validation indices
-    test_indices = (mat['val_unseen_loc']-1).flatten()      # Get validation indices
+    all_images = mat['all_images']
+    all_labels = mat['all_labels'].squeeze()
+    train_indices = mat['train_loc'].squeeze()
+    val_seen_indices = mat['val_seen_loc'].squeeze()
+    val_unseen_indices = mat['val_unseen_loc'].squeeze()
+    test_seen_indices = mat['test_seen_loc'].squeeze()
+    test_unseen_indices = mat['test_unseen_loc'].squeeze()
 
-    # If labels are one-hot encoded or multi-dimensional, convert to class indices
-    if all_labels.dim() > 1:
-        labels = torch.argmax(all_labels.view(all_labels.size(0), -1), dim=1)
-    else:
-        labels = all_labels
-
-    # Setup
-
-    num_classes = int(labels.max().item()) + 1  # Automatically determine number of classes
-
-    # Split data using your indices
-    val_images = all_images[val_indices]
-    val_labels = labels[val_indices].cpu().numpy()
-
-    test_images = all_images[test_indices]
-    test_labels = labels[test_indices].cpu().numpy()
-
-    # Create datasets again
-    val_dataset = ImageDataset(val_images, val_labels, processor, device)
-    test_dataset = ImageDataset(test_images, test_labels, processor, device)
+    # val_indices = np.concatenate((val_seen_indices, val_unseen_indices))
+    # test_indices = np.concatenate((test_seen_indices, test_unseen_indices))
 
     training_args = TrainingArguments(
         per_device_train_batch_size=32,
@@ -216,31 +199,32 @@ def evaluate_model(mat, model_name="./vit-finetuned-final", device = torch.devic
 
     data_collator = DefaultDataCollator()
 
-    # Create trainer just for evaluation
-    val_trainer = Trainer(
-        model=model,
-        args=training_args,
-        eval_dataset=val_dataset,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics
-    )
 
-    # Evaluate
-    val_results = val_trainer.evaluate()
+    for (data_name,indices) in {
+        "val_seen_indices":val_seen_indices,
+        "val_unseen_indices":val_unseen_indices,
+        "test_seen_indices":test_seen_indices,
+        "test_unseen_indices":test_unseen_indices
+        }.items():
 
-    test_trainer = Trainer(
-        model=model,
-        args=training_args,
-        eval_dataset=test_dataset,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics
-    )
+        print(f"Evaluating {data_name}...")
+        # Split data using your indices
+        images = torch.tensor(all_images[indices])
+        labels = all_labels[indices]
 
-    # Evaluate
-    test_results = test_trainer.evaluate()
+        dataset = ImageDataset(images, labels, processor, device)
 
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            eval_dataset=dataset,
+            data_collator=data_collator,
+            compute_metrics=compute_metrics
+        )
+        # Evaluate
+        results = trainer.evaluate()
 
-    return val_results, test_results
+        yield (data_name, results)
 
 
 
