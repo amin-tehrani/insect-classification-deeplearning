@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.optim import lr_scheduler
@@ -8,6 +9,7 @@ from torch.nn import functional as F
 from transformers import AutoModel, Trainer, TrainingArguments, DefaultDataCollator
 import numpy as np
 import evaluate
+from safetensors.torch import load_file  # pip install safetensors
 
 accuracy = evaluate.load("accuracy")
 
@@ -54,9 +56,27 @@ class AttentionFusion(nn.Module):
     def __init__(self, dna_dim, img_dim, fused_dim=None, dna_len_dim=16, num_distinct_dna_len=120, proj_dna_dim=None, proj_img_dim=None, dropout=0.1):
         super().__init__()
 
+        self._config = {
+            "dna_dim": dna_dim,
+            "img_dim": img_dim,
+            "fused_dim": fused_dim,
+            "dna_len_dim": dna_len_dim,
+            "num_distinct_dna_len": num_distinct_dna_len,
+            "proj_dna_dim": proj_dna_dim,
+            "proj_img_dim": proj_img_dim,
+            "dropout": dropout,
+        }
+
+        dna_dim=int(dna_dim)
+        img_dim=int(img_dim)
+        fused_dim=int(fused_dim) if fused_dim is not None else None
+        dna_len_dim=int(dna_len_dim)
+        proj_dna_dim=int(proj_dna_dim) if proj_dna_dim is not None else None
+        proj_img_dim=int(proj_img_dim) if proj_img_dim is not None else None
+
         self.dna_dim=dna_dim
         self.img_dim=img_dim
-        self._fused_dim = fused_dim
+        self._fused_dim =fused_dim
         self.dna_len_dim=dna_len_dim
         self.proj_dna_dim=proj_dna_dim
         self.proj_img_dim=proj_img_dim
@@ -107,7 +127,7 @@ class AttentionFusion(nn.Module):
             return self._fused_dim
         else:
             return self.concatenated_dim
-        
+                
     def forward(self, dna_len_tokens, dna_emb, img_emb):
         # dna_emb: [batch, dna_dim]
         # img_emb: [batch, img_dim]
@@ -156,6 +176,21 @@ class GenusClassifier(nn.Module):
 
     def __init__(self, fused_dim: int, hidden_dim=744, genus_n_classes=372, dropout=0.1, dna_len_dim=16):
         super().__init__()
+
+        self._config = {
+            "fused_dim": fused_dim,
+            "hidden_dim": hidden_dim,
+            "genus_n_classes": genus_n_classes,
+            "dropout": dropout,
+            "dna_len_dim": dna_len_dim
+        }
+
+        fused_dim = int(fused_dim)
+        hidden_dim = int(hidden_dim)
+        genus_n_classes = int(genus_n_classes)
+        dropout = float(dropout)
+        dna_len_dim = int(dna_len_dim)
+
         self.genus_n_classes = genus_n_classes
 
         self.fused_dim = fused_dim
@@ -190,6 +225,28 @@ class LocalSpecieClassfier(nn.Module):
                  dna_len_dim=16
                  ):
         super().__init__()
+
+        fused_dim = int(fused_dim)
+        genus_n_classes = int(genus_n_classes)
+        reduced_fused_dim = int(reduced_fused_dim)
+        max_specie_in_genus = int(max_specie_in_genus)
+        genus_embedding_dim = int(genus_embedding_dim)
+        specie_decoder_hidden_dim = int(specie_decoder_hidden_dim)
+        dropout = float(dropout)
+        dna_len_dim = int(dna_len_dim)
+
+
+        self._config = {
+            "fused_dim": fused_dim,
+            "genus_n_classes": genus_n_classes,
+            "reduced_fused_dim": reduced_fused_dim,
+            "max_specie_in_genus": max_specie_in_genus,
+            "genus_embedding_dim": genus_embedding_dim,
+            "specie_decoder_hidden_dim": specie_decoder_hidden_dim,
+            "dropout": dropout,
+            "dna_len_dim": dna_len_dim
+        }
+
         # self.species2genus = torch.tensor(species2genus-1, dtype=torch.long)
         # self.genus_species = genus_species
         self.fused_dim = fused_dim
@@ -256,6 +313,7 @@ class MainClassifier(nn.Module):
         self.dna_embedder = dna_embedder
         self.img_embedder = img_embedder
         
+        print(fusion_embedder, fusion_embedder.fused_dim, genus_classifier, genus_classifier.fused_dim)
         assert fusion_embedder.fused_dim == genus_classifier.fused_dim, "Fusion embedder and genus classifier must have the same fused dimension"
 
         self.fusion_embedder = fusion_embedder
@@ -387,6 +445,11 @@ class MainClassifier(nn.Module):
         }
 
     def fit(self, train_dataset, eval_dataset, output_dir=f"./results_{time.strftime('%Y%m%dT%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200):
+        config = {
+            "fusion_embedder": self.fusion_embedder._config,
+            "genus_classifier": self.genus_classifier._config,
+            "local_specie_classifier": self.local_specie_classifier._config,
+        }
 
         if self.dna_embedder:
             for param in self.dna_embedder.parameters():
@@ -441,7 +504,141 @@ class MainClassifier(nn.Module):
 
         final_outdir = output_dir + "-final"
         trainer.save_model(final_outdir)
+        
+        with open(f"{final_outdir}/my_model_config.json", "w") as f:
+            json.dump(config, f)
 
         print(f"Model saved to: {final_outdir}")
 
         return trainer
+
+    def load_model_weights(self, model_path):
+        state_dict = load_file(f"{model_path}/model.safetensors")
+
+        return self.load_state_dict(state_dict, strict=False)
+    
+    @classmethod
+    def load_model(cls, model_path, species2genus, genus_species, dna_embedder=None, img_embedder=None, device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+        with open(f"{model_path}/my_model_config.json", "r") as f:
+            config = json.load(f)
+        print("Loaded model config:", config)
+        
+        fusion_embedder = AttentionFusion(**config["fusion_embedder"])
+        genus_classifier = GenusClassifier(**config["genus_classifier"])
+        local_specie_classifier = LocalSpecieClassfier(**config["local_specie_classifier"])
+
+        # print(fusion_embedder, fusion_embedder.fused_dim)
+        # print(genus_classifier, genus_classifier.fused_dim)
+
+
+        state_dict = load_file(f"{model_path}/model.safetensors")
+
+        self = MainClassifier(species2genus, genus_species, dna_embedder, img_embedder, fusion_embedder, genus_classifier, local_specie_classifier).to(device)
+        self.load_state_dict(state_dict, strict=False)
+
+        return self
+
+
+        
+
+    def evaluate(self, datasets: dict):
+        
+        training_args = TrainingArguments(
+            per_device_train_batch_size=32,
+            per_device_eval_batch_size=32,
+            num_train_epochs=3,
+            learning_rate=1e-4,
+            logging_steps=50,
+            save_strategy="steps",
+            save_steps=500,
+            eval_strategy="steps",  # Changed from evaluation_strategy
+            eval_steps=500,
+            save_total_limit=2,
+            remove_unused_columns=False,
+            push_to_hub=False,
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+        )
+
+        data_collator = DefaultDataCollator()
+
+
+        for (data_name,dataset) in datasets.items():
+
+            print(f"Evaluating {data_name}...")
+            # Split data using your indices
+            
+            trainer = Trainer(
+                model=self,
+                args=training_args,
+                eval_dataset=dataset,
+                data_collator=data_collator,
+                compute_metrics=compute_metrics
+            )
+            # Evaluate
+            results = trainer.evaluate()
+
+            yield (data_name, results)
+
+
+
+
+
+def evaluate_model(mat, model_path="./results_20250819T030148-final", device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+        
+    all_images = mat['all_images']
+    all_labels = mat['all_labels'].squeeze()
+
+    val_seen_indices = mat['val_seen_loc'].squeeze()
+    val_unseen_indices = mat['val_unseen_loc'].squeeze()
+    test_seen_indices = mat['test_seen_loc'].squeeze()
+    test_unseen_indices = mat['test_unseen_loc'].squeeze()
+
+    # val_indices = np.concatenate((val_seen_indices, val_unseen_indices))
+    # test_indices = np.concatenate((test_seen_indices, test_unseen_indices))
+
+    training_args = TrainingArguments(
+        per_device_train_batch_size=32,
+        per_device_eval_batch_size=32,
+        num_train_epochs=3,
+        learning_rate=1e-4,
+        logging_steps=50,
+        save_strategy="steps",
+        save_steps=500,
+        eval_strategy="steps",  # Changed from evaluation_strategy
+        eval_steps=500,
+        save_total_limit=2,
+        remove_unused_columns=False,
+        push_to_hub=False,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+    )
+
+    data_collator = DefaultDataCollator()
+
+
+    for (data_name,indices) in {
+        "val_seen_indices":val_seen_indices,
+        "val_unseen_indices":val_unseen_indices,
+        "test_seen_indices":test_seen_indices,
+        "test_unseen_indices":test_unseen_indices
+        }.items():
+
+        print(f"Evaluating {data_name}...")
+        # Split data using your indices
+        images = torch.tensor(all_images[indices])
+        labels = all_labels[indices]
+
+        dataset = ImageDataset(images, labels, processor, device)
+
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            eval_dataset=dataset,
+            data_collator=data_collator,
+            compute_metrics=compute_metrics
+        )
+        # Evaluate
+        results = trainer.evaluate()
+
+        yield (data_name, results)
