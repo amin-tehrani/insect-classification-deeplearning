@@ -491,17 +491,7 @@ class MainClassifier(nn.Module):
     
         return result
 
-
-    def forward(self, dna_len_tokens, image_inputs=None, dna_inputs=None, dna_emb=None, img_emb=None ,genus=None, local_specie_lbl=None, labels=None):
-
-        # print("MainClassifier input:",'dna_len_tokens', dna_len_tokens.shape,
-        #     #   'image_inputs', image_inputs['pixel_values'].shape if image_inputs is not None else None,
-        #       'genus', genus.shape if genus is not None else None,
-        #       'labels', labels.shape if labels is not None else None,
-        #     #   'dna_inputs', dna_inputs['input_ids'].shape if dna_inputs is not None else None,
-        #       'img_emb', img_emb.shape if img_emb is not None else None,
-        #       'dna_emb', dna_emb.shape if dna_emb is not None else None)
-        
+    def predict_genus(self, dna_len_tokens, image_inputs=None, dna_inputs=None, dna_emb=None, img_emb=None, *args, **kwargs):
         dna_len_tokens = dna_len_tokens.unsqueeze(0) if dna_len_tokens.ndim == 0 else dna_len_tokens
 
         with torch.no_grad():  # extra safety, avoids computing grads
@@ -516,21 +506,48 @@ class MainClassifier(nn.Module):
         fused_emb, dna_len_emb = self.fusion_embedder(dna_len_tokens, dna_emb, img_emb)  # [batch_size, fused_dim]
 
         # print("Fused Embedding Shape:", fused_emb.shape)
-        genus_logits = self.genus_classifier(fused_emb, dna_len_emb)
+        return self.genus_classifier(fused_emb, dna_len_emb), fused_emb, dna_len_emb
 
-        # print("genus_logits1 shape:", genus_logits.shape)
 
-        if genus is not None: # Teacher forcing
-            # print(genus)
-            genus_logits = F.one_hot(genus, num_classes=self.genus_classifier.genus_n_classes).squeeze().to(torch.float32)
+    def forward(self, dna_len_tokens, image_inputs=None, dna_inputs=None, dna_emb=None, img_emb=None ,genus=None, local_specie_lbl=None, labels=None):
+
+        genus_logits, fused_emb, dna_len_emb = self.predict_genus(dna_len_tokens, image_inputs, dna_inputs, dna_emb, img_emb)
+        # print("OnlyGenus", self._only_genus)
+
+        if getattr(self, '_only_genus', False):
+            
+            # if genus is None:
+            #     genus = self.species2genus[labels.clone().cpu()].to(next(self.parameters()).device).squeeze()
+
+            g_loss = self.genus_criterion(genus_logits, genus.squeeze())
+            # print(g_loss)
+            return {
+                "logits": genus_logits,
+                "loss": g_loss
+            }
+
+        teacher_genus_logits = F.one_hot(genus, num_classes=self.genus_classifier.genus_n_classes).squeeze().to(torch.float32)
+
+        if getattr(self, '_freeze_genus', False):
+            # Detach genus path so gradients don't flow back via genus head
+            genus_logits = genus_logits.detach()
+            genus_logits = teacher_genus_logits
+
+        if getattr(self, '_freeze_fusion', False):
+            # Detach genus path so gradients don't flow back via genus head
+            fused_emb = fused_emb.detach()
+            dna_len_emb = dna_len_emb.detach()
 
 
         if len(genus_logits.shape) <= 1:
             genus_logits = genus_logits.unsqueeze(0)
 
+        if len(teacher_genus_logits.shape) <= 1:
+            teacher_genus_logits = teacher_genus_logits.unsqueeze(0)
+
         # print("genus_logits2 shape:", genus_logits.shape)
 
-        local_specie_logits = self.local_specie_classifier(fused_emb, dna_len_emb, genus_logits)
+        local_specie_logits = self.local_specie_classifier(fused_emb, dna_len_emb, genus_logits if genus is None else teacher_genus_logits)
         # print("local_specie_logits shape:", local_specie_logits.shape)
 
 
@@ -553,7 +570,19 @@ class MainClassifier(nn.Module):
             "loss": loss
         }
 
-    def fit(self, train_dataset, eval_dataset, output_dir=f"./model_trained_{time.strftime('%Y%m%dT%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200):
+    def fit(self, train_dataset, eval_dataset, output_dir=f"./model_trained_{time.strftime('%Y%m%dT%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200, only_genus=False, freeze_genus=False, freeze_fusion=False):
+
+        self._only_genus = only_genus
+        self._freeze_genus = freeze_genus
+        self._freeze_fusion = freeze_fusion
+
+        if only_genus:
+            output_dir += "_onlygenus"
+        if freeze_genus:
+            output_dir += "_freezegenus"
+        if freeze_fusion:
+            output_dir += "_freezefusion"
+
         final_outdir = output_dir + "-final"
 
         print("Training:", output_dir)
@@ -585,6 +614,7 @@ class MainClassifier(nn.Module):
             weight_decay=0.01,
             logging_dir=f"{output_dir}/logs",
             logging_steps=50,
+            load_best_model_at_end=True,
             do_train=True,
             # load_best_model_at_end=True if eval_dataset is not None else False,
             # metric_for_best_model="accuracy",   
@@ -594,21 +624,26 @@ class MainClassifier(nn.Module):
             report_to=["tensorboard"],        # or ["wandb"], ["mlflow"], ["comet_ml"]
         )
         print(f"Training arguments: {training_args}")
-        # Data collatordef compute_metrics(eval_pred):
+    
+
+        if only_genus:
+            def compute_metrics_genus(eval_pred):
+                logits, slabels = eval_pred
+                if isinstance(logits, (tuple, list)):
+                    logits = logits[0]
+                slabels = np.array(slabels).reshape(-1)
+                preds = np.argmax(logits, axis=-1)
+                labels = self.species2genus[slabels].cpu().numpy()
+                return {"accuracy": accuracy.compute(predictions=preds, references=labels)["accuracy"]}
 
         
-        # def compute_metrics(eval_pred):
-        #     logits, labels = eval_pred
-        #     preds = np.argmax(logits, axis=-1)
-        #     return accuracy.compute(predictions=preds, references=labels)
-    
         # Define Trainer
         trainer = Trainer(
             model=self,
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            compute_metrics=compute_metrics,
+            compute_metrics=compute_metrics_genus if only_genus else compute_metrics,
             data_collator=multimodal_collector,
         )
 
@@ -620,8 +655,15 @@ class MainClassifier(nn.Module):
         eval_results = trainer.evaluate()
         print(eval_results)
         
-        with open(f"{final_outdir}/my_model_config.json", "w") as f:
-            json.dump(config, f)
+        try:
+            with open(f"{final_outdir}/my_model_config.json", "w") as f:
+                json.dump(config, f)
+        except:
+            try:
+                with open(f"{final_outdir}_my_model_config.json", "w") as f:
+                    json.dump(config, f)
+            except:
+                pass
 
         print(f"Model saved to: {final_outdir}")
 
@@ -677,7 +719,7 @@ class MainClassifier(nn.Module):
 
         
 
-    def evaluate(self, datasets: dict):
+    def evaluate(self, datasets: dict, only_genus=False):
         
         training_args = TrainingArguments(
             # per_device_train_batch_size=32,
@@ -701,18 +743,71 @@ class MainClassifier(nn.Module):
 
             print(f"Evaluating {data_name}...")
             # Split data using your indices
+
+            self._only_genus = only_genus
+
+            if only_genus:
+                def compute_metrics_genus(eval_pred):
+                    logits, slabels = eval_pred
+                    if isinstance(logits, (tuple, list)):
+                        logits = logits[0]
+                    slabels = np.array(slabels).reshape(-1)
+                    preds = np.argmax(logits, axis=-1)
+                    labels = self.species2genus[slabels].cpu().numpy()
+                    return {"accuracy": accuracy.compute(predictions=preds, references=labels)["accuracy"]}
             
             trainer = Trainer(
                 model=self,
                 args=training_args,
                 eval_dataset=dataset,
                 data_collator=multimodal_collector,
-                compute_metrics=compute_metrics
+                compute_metrics=compute_metrics_genus if only_genus else compute_metrics
             )
             # Evaluate
             results = trainer.evaluate()
 
             yield (data_name, results)
+
+
+    def evaluate_genus(self, datasets: dict, batch=256):
+        def evaluate_dataset(d):
+            data_type, dataset = d
+            print("Evaluating genus for", data_type)
+            device = next(self.parameters()).device
+            all_predicted = torch.tensor([], dtype=torch.long, device=device)
+            all_true = torch.tensor([], dtype=torch.long, device=device)
+            for i in range(len(dataset) // batch):
+                batch_data = multimodal_collector([dataset[di] for di in range(i * batch, (i + 1) * batch)])
+                # Move all tensors in batch_data to the model's device
+                for k, v in batch_data.items():
+                    if isinstance(v, dict):
+                        for kk, vv in v.items():
+                            batch_data[k][kk] = vv.to(device)
+                    else:
+                        batch_data[k] = v.to(device)
+                genus_logits, *_ = self.predict_genus(**batch_data)
+                predicted_genus = genus_logits.argmax(dim=-1)
+                true_genus = batch_data['genus'].squeeze()
+                # print(predicted_genus, true_genus)
+                all_predicted = torch.cat((all_predicted, predicted_genus), dim=0)
+                all_true = torch.cat((all_true, true_genus), dim=0)
+            # print(predicted_genus.shape, true_genus.shape, predicted_genus[:2], true_genus[:2])
+
+            # print({
+            #     # "predicted_genus": all_predicted,
+            #     # "true_genus": all_true,
+            #     "accuracy": (all_predicted == all_true).float().mean().item()
+            # }, data_type, all_predicted[:20], all_true[:20])
+            
+            return data_type, {
+                # "predicted_genus": all_predicted,
+                # "true_genus": all_true,
+                "accuracy": (all_predicted == all_true).float().mean().item()
+            }
+
+        return map(evaluate_dataset, datasets.items())
+
+
 
 
 
