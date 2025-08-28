@@ -313,7 +313,7 @@ class MainClassifier(nn.Module):
         self.dna_embedder = dna_embedder
         self.img_embedder = img_embedder
         
-        print(fusion_embedder, fusion_embedder.fused_dim, genus_classifier, genus_classifier.fused_dim)
+        # print(fusion_embedder, fusion_embedder.fused_dim, genus_classifier, genus_classifier.fused_dim)
         assert fusion_embedder.fused_dim == genus_classifier.fused_dim, "Fusion embedder and genus classifier must have the same fused dimension"
 
         self.fusion_embedder = fusion_embedder
@@ -444,7 +444,7 @@ class MainClassifier(nn.Module):
             "loss": loss
         }
 
-    def fit(self, train_dataset, eval_dataset, output_dir=f"./results_{time.strftime('%Y%m%dT%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200):
+    def fit(self, train_dataset, eval_dataset, output_dir=f"./model_trained_{time.strftime('%Y%m%dT%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200):
         config = {
             "fusion_embedder": self.fusion_embedder._config,
             "genus_classifier": self.genus_classifier._config,
@@ -471,14 +471,14 @@ class MainClassifier(nn.Module):
             num_train_epochs=epochs,
             weight_decay=0.01,
             logging_dir=f"{output_dir}/logs",
-            logging_steps=100,
+            logging_steps=50,
             do_train=True,
             # load_best_model_at_end=True if eval_dataset is not None else False,
-            report_to="none",   # disable W&B unless you want it
             # metric_for_best_model="accuracy",   
             greater_is_better=True,
             lr_scheduler_type="linear",
             warmup_steps=200,
+            report_to=["tensorboard"],        # or ["wandb"], ["mlflow"], ["comet_ml"]
         )
         print(f"Training arguments: {training_args}")
         # Data collatordef compute_metrics(eval_pred):
@@ -504,13 +504,16 @@ class MainClassifier(nn.Module):
 
         final_outdir = output_dir + "-final"
         trainer.save_model(final_outdir)
+
+        eval_results = trainer.evaluate()
+        print(eval_results)
         
         with open(f"{final_outdir}/my_model_config.json", "w") as f:
             json.dump(config, f)
 
         print(f"Model saved to: {final_outdir}")
 
-        return trainer
+        return final_outdir, trainer, eval_results
 
     def load_model_weights(self, model_path):
         state_dict = load_file(f"{model_path}/model.safetensors")
@@ -534,7 +537,7 @@ class MainClassifier(nn.Module):
         state_dict = load_file(f"{model_path}/model.safetensors")
 
         self = MainClassifier(species2genus, genus_species, dna_embedder, img_embedder, fusion_embedder, genus_classifier, local_specie_classifier).to(device)
-        self.load_state_dict(state_dict, strict=False)
+        print("Loaded model state:", self.load_state_dict(state_dict, strict=False))
 
         return self
 
@@ -544,9 +547,9 @@ class MainClassifier(nn.Module):
     def evaluate(self, datasets: dict):
         
         training_args = TrainingArguments(
-            per_device_train_batch_size=32,
+            # per_device_train_batch_size=32,
             per_device_eval_batch_size=32,
-            num_train_epochs=3,
+            # num_train_epochs=3,
             learning_rate=1e-4,
             logging_steps=50,
             save_strategy="steps",
@@ -560,8 +563,6 @@ class MainClassifier(nn.Module):
             metric_for_best_model="eval_loss",
         )
 
-        data_collator = DefaultDataCollator()
-
 
         for (data_name,dataset) in datasets.items():
 
@@ -572,7 +573,7 @@ class MainClassifier(nn.Module):
                 model=self,
                 args=training_args,
                 eval_dataset=dataset,
-                data_collator=data_collator,
+                data_collator=multimodal_collector,
                 compute_metrics=compute_metrics
             )
             # Evaluate

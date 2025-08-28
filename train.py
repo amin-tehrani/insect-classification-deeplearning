@@ -11,8 +11,6 @@ import pandas as pd
 from importlib import reload
 from mat import mat
 
-# %%
-mat.keys()
 
 # %%
 species2genus = mat['species2genus']-1
@@ -41,12 +39,9 @@ def dna_str_len_to_int(s_len):
         dna_str_len_mapping[s_len] = len(dna_str_len_mapping)
     return dna_str_len_mapping[s_len]
 
-# def all_dna_len_token():
-#     return list(map(dna_str_len_to_int, all_dna_len))
 
 all_dna_len_tokens = list(map(dna_str_len_to_int, all_dna_len))
 all_dna_len_tokens = np.array(all_dna_len_tokens, dtype=np.int64)
-# print(list(zip(all_dna_len, all_dna_len_tokens))[:20])
 
 # %%
 deviceGPU = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
@@ -54,7 +49,6 @@ deviceCPU = torch.device("cpu")
 
 device = deviceGPU
 print("Device:",device)
-
 
 # %%
 import vit
@@ -70,11 +64,7 @@ from dnaencoder import get_tokenizer_encoder, get_dna_embedding
 dna_tokenizer, dna_encoder = get_tokenizer_encoder("./dnaencoder-finetuned1755100772-final", deviceGPU)
 # get_dna_embedding(mat['all_string_dnas'][:2], dna_tokenizer, dna_encoder).shape
 
-# %%
-# from sklearn.decomposition import PCA
 
-# pca = PCA(n_components=512)
-# all_dna_features_cnn = np.array(pca.fit_transform(mat['all_dna_features_cnn_new']))
 from load_embeddings import load_dna_embeddings, load_img_embeddings
 
 all_dna_features = load_dna_embeddings()
@@ -82,45 +72,20 @@ all_image_features = load_img_embeddings()
 
 
 # %%
-# pca = PCA(n_components=768)
-# all_image_features_gan = np.array(pca.fit_transform(mat['all_image_features_gan']))
-# all_image_features_gan = get_img_embedding(mat['all_images'], img_processor, img_encoder, deviceGPU)
-
-# print("All IMG features shape:", all_image_features_cnn.shape)
-
-# %%
-# import multimodal_dataset
-# reload(multimodal_dataset)
-# from multimodal_dataset import MultiModalDataset
-# dataset = MultiModalDataset(mat['all_string_dnas'], mat['all_images'], np.transpose(mat['all_labels'], (1,0)), dna_str_len_mapping, species2genus, genus_species, None, None, )
-#                             # dna_embeddings=all_dna_features_cnn_pca, img_embeddings=all_image_features_gan_pca)
-# (dataset[0])
-# _ = (dataset[0:5])
-
-
-
-
-# %%
 train_indices = (mat['train_loc'] - 1).flatten()  # Get train indices
-val_indices = (mat['val_seen_loc'] - 1).flatten()  # Get validation indices
-
-
+val_indices = np.concatenate([
+    (mat['val_seen_loc'] - 1).flatten(),
+    (mat['val_unseen_loc'] - 1).flatten()
+])  # Get validation indices (seen + unseen)
 
 # %%
 import multimodal_dataset
 reload(multimodal_dataset)
 from multimodal_dataset import MultiModalDataset
-# all_dataset = MultiModalDataset(mat['all_string_dnas'], mat['all_images'], np.transpose(mat['all_labels'], (1,0)), dna_str_len_mapping, species2genus, genus_species, None, None, 
-#                             dna_embeddings=all_dna_features_cnn_pca, img_embeddings=all_image_features_gan_pca)
 
 train_dataset = MultiModalDataset(mat['all_string_dnas'][train_indices], mat['all_images'][train_indices], np.transpose(mat['all_labels'], (1,0))[train_indices], dna_str_len_mapping, species2genus, genus_species, None, None, dna_embeddings=all_dna_features[train_indices], img_embeddings=all_image_features[train_indices])
 val_dataset = MultiModalDataset(mat['all_string_dnas'][val_indices], mat['all_images'][val_indices], np.transpose(mat['all_labels'], (1,0))[val_indices], dna_str_len_mapping, species2genus, genus_species, None, None, dna_embeddings=all_dna_features[val_indices], img_embeddings=all_image_features[val_indices])
-
-# print(train_dataset[0])
-# exit()
 # %%
-
-
 import models
 reload(models)
 from models import AttentionFusion, GenusClassifier, LocalSpecieClassfier, MainClassifier, multimodal_collector
@@ -139,28 +104,14 @@ def get_main_classifier():
 
 main_classifier = get_main_classifier()
 
-# print(main_classifier(**multimodal_collector([dataset[0], dataset[1]])))
-# print(main_classifier(**dataset[0]))
-# print(main_classifier(**dataset[0:2]))
-import os
-# os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-# os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-# os.environ.setdefault("NCCL_P2P_DISABLE", "0") # export NCCL_P2P_DISABLE=0
-# os.environ.setdefault("NCCL_IB_DISABLE", "0") # export NCCL_IB_DISABLE=0
-# os.environ.setdefault("OMP_NUM_THREADS", "4") # export OMP_NUM_THREADS=4
-
-# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # Disable Weights & Biases logging
-# os.environ["TORCH_USE_CUDA_DSA"] = "1"  # Disable Weights & Biases logging
-
 import warnings
 warnings.filterwarnings("ignore")
-
 
 # %%
 main_classifier.fit(
     train_dataset,
     val_dataset,
-    batch_size=64,
+    batch_size=256,
     epochs=500,
     eval_steps=200,
     save_steps=400,
