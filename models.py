@@ -97,8 +97,6 @@ class AttentionFusion(nn.Module):
 
         self.dropout = dropout
 
-        # Attention layer
-        
         # Optional: feed-forward layer after attention
         self.ffn = nn.Sequential(
             nn.Linear(self.concatenated_dim, self.fused_dim),
@@ -171,6 +169,114 @@ class AttentionFusion(nn.Module):
         fused = self.ffn(seq)
         return fused, dna_len_emb
 
+class AttentionFusionV2(nn.Module):
+    """
+    Transformer-style fusion with a learnable [FUSE] token that attends to:
+      - DNA length embedding
+      - DNA embedding
+      - Image embedding
+    Returns fused vector and the dna_len embedding (like your original).
+    """
+    def __init__(
+        self,
+        dna_dim,
+        img_dim,
+        num_distinct_dna_len=120,
+        dna_len_dim=16,
+        fused_dim=256,
+        n_heads=4,
+        ff_mult=4,
+        dropout=0.1,
+        num_layers=1,          # you can set 2 for a bit more capacity
+    ):
+        super().__init__()
+        self._config = {
+            "num_distinct_dna_len": num_distinct_dna_len,
+            "dna_len_dim": dna_len_dim,
+            "fused_dim": fused_dim,
+            "n_heads": n_heads,
+            "ff_mult": ff_mult,
+            "dropout": dropout,
+            "num_layers": num_layers
+        }
+
+        self.fused_dim = fused_dim
+        self.dna_len_emb = nn.Embedding(num_distinct_dna_len, dna_len_dim)
+
+
+        # Project all modalities to common d_model
+        self.proj_dna = nn.Linear(dna_dim, fused_dim)
+        self.proj_img = nn.Linear(img_dim, fused_dim)
+        self.proj_len = nn.Linear(dna_len_dim, fused_dim)
+
+        # learnable fusion token
+        self.fuse_token = nn.Parameter(torch.randn(1, 1, fused_dim) * 0.02)
+
+        # Transformer encoder blocks (pre-norm)
+        layers = []
+        for _ in range(num_layers):
+            layers.append(nn.ModuleDict({
+                "ln1": nn.LayerNorm(fused_dim),
+                "attn": nn.MultiheadAttention(fused_dim, n_heads, dropout=dropout, batch_first=True),
+                "ln2": nn.LayerNorm(fused_dim),
+                "ff": nn.Sequential(
+                    nn.Linear(fused_dim, ff_mult * fused_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(ff_mult * fused_dim, fused_dim),
+                ),
+                "drop": nn.Dropout(dropout),
+            }))
+        self.blocks = nn.ModuleList(layers)
+
+        # Optional post-fusion gate (helps zero-shot)
+        self.gate = nn.Sequential(
+            nn.LayerNorm(fused_dim),
+            nn.Linear(fused_dim, fused_dim),
+            nn.Sigmoid()
+        )
+
+        self.out_dim = fused_dim
+
+    def forward(self, dna_len_tokens, dna_emb, img_emb):
+        """
+        dna_len_tokens: [B, 1] (long)
+        dna_emb:        [B, dna_dim]
+        img_emb:        [B, img_dim]
+        """
+        B = dna_emb.size(0)
+
+        # Build tokens
+        len_tok = self.dna_len_emb(dna_len_tokens.squeeze(1))   # [B, dna_len_dim]
+        len_tok = self.proj_len(len_tok)                        # [B, d_model]
+        dna_tok = self.proj_dna(dna_emb)                        # [B, d_model]
+        img_tok = self.proj_img(img_emb)                        # [B, d_model]
+
+        # Sequence: [FUSE, LEN, DNA, IMG]
+        fuse = self.fuse_token.expand(B, -1, -1)                # [B, 1, d_model]
+        seq = torch.stack([len_tok, dna_tok, img_tok], dim=1)   # [B, 3, d_model]
+        x = torch.cat([fuse, seq], dim=1)                       # [B, 4, d_model]
+
+        # Transformer encoder
+        for blk in self.blocks:
+            # Self-attention (pre-norm)
+            y = blk.ln1(x)
+            attn_out, _ = blk.attn(y, y, y, need_weights=False)
+            x = x + blk.drop(attn_out)
+            # FFN
+            y = blk.ln2(x)
+            x = x + blk.drop(blk.ff(y))
+
+        # Take fused representation from [CLS]-like token
+        fused = x[:, 0, :]                                      # [B, d_model]
+
+        # Gate (stabilizes zero-shot by shrinking out-of-distribution activations)
+        g = self.gate(fused)
+        fused = fused * g
+
+        # For parity with your API, also return dna_len embedding (pre-projection)
+        return fused, self.dna_len_emb(dna_len_tokens).squeeze(1)
+
     
 class GenusClassifier(nn.Module):
 
@@ -197,10 +303,11 @@ class GenusClassifier(nn.Module):
         self.dna_len_dim = dna_len_dim
         self.dropout = dropout
         self.decoder = nn.Sequential(
+            nn.LayerNorm(dna_len_dim+fused_dim),
             nn.Linear(dna_len_dim+fused_dim, hidden_dim),
-            nn.Sigmoid(),
+            nn.GELU(),
             nn.Dropout(p=dropout),
-            nn.Linear(hidden_dim, genus_n_classes)
+            nn.Linear(hidden_dim, genus_n_classes),
         )
 
     def forward(self, fused_emb, dna_len_token):
@@ -261,10 +368,12 @@ class LocalSpecieClassfier(nn.Module):
         self.fused_proj = nn.Linear(fused_dim, reduced_fused_dim)
         self.genus_embedder = nn.Linear(genus_n_classes, genus_embedding_dim)
         self.specie_decoder = nn.Sequential(
+            nn.LayerNorm(dna_len_dim+reduced_fused_dim+genus_embedding_dim),
             nn.Linear(dna_len_dim+reduced_fused_dim+genus_embedding_dim, specie_decoder_hidden_dim),
-            nn.Sigmoid(),
+            nn.GELU(),
             nn.Dropout(p=self.dropout),
-            nn.Linear(specie_decoder_hidden_dim, max_specie_in_genus)
+            nn.Linear(specie_decoder_hidden_dim, max_specie_in_genus),
+            nn.LayerNorm(max_specie_in_genus)
         )
 
         # self.optimizer = torch.optim.Adam(self.parameters(), lr=0.01)
@@ -445,6 +554,10 @@ class MainClassifier(nn.Module):
         }
 
     def fit(self, train_dataset, eval_dataset, output_dir=f"./model_trained_{time.strftime('%Y%m%dT%H%M%S')}", batch_size=8, epochs=3, lr=5e-5, eval_steps=50, save_steps=200):
+        final_outdir = output_dir + "-final"
+
+        print("Training:", output_dir)
+
         config = {
             "fusion_embedder": self.fusion_embedder._config,
             "genus_classifier": self.genus_classifier._config,
@@ -502,7 +615,6 @@ class MainClassifier(nn.Module):
         # Train
         trainer.train()
 
-        final_outdir = output_dir + "-final"
         trainer.save_model(final_outdir)
 
         eval_results = trainer.evaluate()
@@ -527,6 +639,27 @@ class MainClassifier(nn.Module):
         print("Loaded model config:", config)
         
         fusion_embedder = AttentionFusion(**config["fusion_embedder"])
+        genus_classifier = GenusClassifier(**config["genus_classifier"])
+        local_specie_classifier = LocalSpecieClassfier(**config["local_specie_classifier"])
+
+        # print(fusion_embedder, fusion_embedder.fused_dim)
+        # print(genus_classifier, genus_classifier.fused_dim)
+
+
+        state_dict = load_file(f"{model_path}/model.safetensors")
+
+        self = MainClassifier(species2genus, genus_species, dna_embedder, img_embedder, fusion_embedder, genus_classifier, local_specie_classifier).to(device)
+        print("Loaded model state:", self.load_state_dict(state_dict, strict=False))
+
+        return self
+
+    @classmethod
+    def load_modelV2(cls, model_path, species2genus, genus_species, dna_embedder=None, img_embedder=None, device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+        with open(f"{model_path}/my_model_config.json", "r") as f:
+            config = json.load(f)
+        print("Loaded model config:", config)
+        
+        fusion_embedder = AttentionFusionV2(**config["fusion_embedder"], dna_dim=512, img_dim=768)
         genus_classifier = GenusClassifier(**config["genus_classifier"])
         local_specie_classifier = LocalSpecieClassfier(**config["local_specie_classifier"])
 

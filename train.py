@@ -88,14 +88,15 @@ val_dataset = MultiModalDataset(mat['all_string_dnas'][val_indices], mat['all_im
 # %%
 import models
 reload(models)
-from models import AttentionFusion, GenusClassifier, LocalSpecieClassfier, MainClassifier, multimodal_collector
+from models import AttentionFusion, AttentionFusionV2, GenusClassifier, LocalSpecieClassfier, MainClassifier, multimodal_collector
 
 def get_main_classifier():
-    fusion_embedder = AttentionFusion(dna_dim=512,img_dim=768,dna_len_dim=32, fused_dim=258, proj_dna_dim=128-32, proj_img_dim=128, dropout=0.2)
+    fusion_embedder = AttentionFusion(dna_dim=512,img_dim=768,dna_len_dim=32, fused_dim=256, proj_dna_dim=128-32, proj_img_dim=128, dropout=0.2)
+    # fusion_embedder = AttentionFusionV2(dna_dim=512,img_dim=768,dna_len_dim=32, fused_dim=256, dropout=0.2)
     print("Fusion model created. fused dim: ", fusion_embedder.fused_dim)
-    genus_classifier = GenusClassifier(fusion_embedder.fused_dim,dropout=0.1, dna_len_dim=32)
+    genus_classifier = GenusClassifier(fusion_embedder.fused_dim,dropout=0.2, dna_len_dim=32)
 
-    local_specie_classifier = LocalSpecieClassfier(fusion_embedder.fused_dim,reduced_fused_dim=128, specie_decoder_hidden_dim=256, dropout=0.1,dna_len_dim=32)
+    local_specie_classifier = LocalSpecieClassfier(fusion_embedder.fused_dim,reduced_fused_dim=128, specie_decoder_hidden_dim=256, dropout=0.2,dna_len_dim=32)
 
     return MainClassifier(mat['species2genus'], genus_species, None, None, fusion_embedder, genus_classifier,
                           local_specie_classifier,
@@ -111,11 +112,11 @@ warnings.filterwarnings("ignore")
 main_classifier.fit(
     train_dataset,
     val_dataset,
-    batch_size=256,
+    batch_size=512,
     epochs=500,
     eval_steps=200,
     save_steps=400,
-    lr=1e-3
+    lr=0.0001
 )
 
 
