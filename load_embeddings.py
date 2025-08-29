@@ -34,7 +34,7 @@ def save_img():
         with open(os.path.join(save_dir, f"batch_img_{i//B}.pkl"), 'wb') as f:
             pickle.dump(batch_emb, f)
 
-def load_img_embeddings(path="./img_embeddings"):
+def load_img_embeddings(path="./output_embeddings/img_embeddings"):
     all_images_features = []
     for file in os.listdir(path):
         print("Loading file:", file)
@@ -46,7 +46,7 @@ def load_img_embeddings(path="./img_embeddings"):
     return torch.cat(all_images_features, dim=0).to(torch.float16)
 
 
-def load_dna_embeddings(path="./dna_embeddings"):
+def load_dna_embeddings(path="./output_embeddings/dna_embeddings"):
     all_images_features = []
     for file in os.listdir(path):
         print("Loading file:", file)
